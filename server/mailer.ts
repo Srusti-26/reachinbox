@@ -20,6 +20,27 @@ export function getEtherealTransporter(smtpConfig: SmtpConfig): Transporter {
   etherealTransporters.set(key, t);
   return t;
 }
+
+// Shared Ethereal transporter created via createTestAccount — getTestMessageUrl works on this
+let etherealSharedTransporter: Transporter | null = null;
+
+export async function getEtherealSharedTransporter(): Promise<Transporter> {
+  if (etherealSharedTransporter) return etherealSharedTransporter;
+  try {
+    const acct = await nodemailer.createTestAccount();
+    etherealSharedTransporter = nodemailer.createTransport({
+      host: 'smtp.ethereal.email',
+      port: 587,
+      secure: false,
+      auth: { user: acct.user, pass: acct.pass },
+    });
+    console.log('[Mailer] Ethereal shared transporter ready:', acct.user);
+  } catch {
+    // fallback to default transporter
+    etherealSharedTransporter = await getTransporter();
+  }
+  return etherealSharedTransporter!;
+}
   const cacheKey = `${config.host}:${config.port}:${config.user}`;
   if (cachedTransporters.has(cacheKey)) {
     return cachedTransporters.get(cacheKey)!;
@@ -117,30 +138,34 @@ export interface SendEmailResult {
   error?: string;
 }
 
+// Domains that get real delivery via Gmail SMTP
+const REAL_DELIVERY_DOMAINS = ['gmail.com', 'nmit.ac.in', 'outboxlabs.in', 'reachinbox.in', 'outlook.com', 'hotmail.com', 'yahoo.com'];
+
+export function isRealDeliveryEmail(email: string): boolean {
+  const domain = email.split('@')[1]?.toLowerCase() || '';
+  return REAL_DELIVERY_DOMAINS.some(d => domain === d || domain.endsWith('.' + d));
+}
+
 export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult> {
   try {
     let transport: Transporter;
     let isRealDelivery = false;
-    let isEthereal = false;
 
-    const smtpHost = opts.smtpConfig?.host || '';
-    isEthereal = /ethereal\.email$/i.test(smtpHost) || opts.smtpConfig === undefined;
+    const useReal = isRealDeliveryEmail(opts.toEmail) &&
+      process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS &&
+      !process.env.SMTP_PASS.includes('REPLACE');
 
-    if (opts.smtpConfig && opts.smtpConfig.host && opts.smtpConfig.user && !isEthereal) {
-      // Real SMTP (Gmail, etc.)
-      transport = getCustomTransporter(opts.smtpConfig);
-      isRealDelivery = true;
-    } else if (opts.smtpConfig && opts.smtpConfig.host && opts.smtpConfig.user && isEthereal) {
-      // Ethereal sender — use dedicated transporter so getTestMessageUrl works
-      transport = getEtherealTransporter(opts.smtpConfig);
-      isRealDelivery = false;
-    } else if (process.env.SMTP_HOST && process.env.SMTP_USER && !/ethereal/i.test(process.env.SMTP_HOST)) {
-      // Env-level real SMTP
-      transport = await getTransporter();
+    if (useReal) {
+      // Real delivery via Gmail SMTP
+      if (opts.smtpConfig && opts.smtpConfig.host && !/ethereal/i.test(opts.smtpConfig.host)) {
+        transport = getCustomTransporter(opts.smtpConfig);
+      } else {
+        transport = await getTransporter();
+      }
       isRealDelivery = true;
     } else {
-      // Fallback: shared Ethereal transporter
-      transport = await getTransporter();
+      // Ethereal sandbox — always use shared transporter so getTestMessageUrl works
+      transport = await getEtherealSharedTransporter();
       isRealDelivery = false;
     }
 

@@ -5,10 +5,21 @@ let defaultTransporter: Transporter | null = null;
 let etherealUser: string | null = null;
 const cachedTransporters: Map<string, Transporter> = new Map();
 
-/**
- * Creates or retrieves a Nodemailer transporter for custom real-world SMTP configurations.
- */
-export function getCustomTransporter(config: SmtpConfig): Transporter {
+// Cache for Ethereal transporters keyed by user — getTestMessageUrl works on these
+const etherealTransporters: Map<string, Transporter> = new Map();
+
+export function getEtherealTransporter(smtpConfig: SmtpConfig): Transporter {
+  const key = smtpConfig.user;
+  if (etherealTransporters.has(key)) return etherealTransporters.get(key)!;
+  const t = nodemailer.createTransport({
+    host: 'smtp.ethereal.email',
+    port: 587,
+    secure: false,
+    auth: { user: smtpConfig.user, pass: smtpConfig.pass },
+  });
+  etherealTransporters.set(key, t);
+  return t;
+}
   const cacheKey = `${config.host}:${config.port}:${config.user}`;
   if (cachedTransporters.has(cacheKey)) {
     return cachedTransporters.get(cacheKey)!;
@@ -120,8 +131,8 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
       transport = getCustomTransporter(opts.smtpConfig);
       isRealDelivery = true;
     } else if (opts.smtpConfig && opts.smtpConfig.host && opts.smtpConfig.user && isEthereal) {
-      // Ethereal sender with stored credentials — use custom transporter so preview URL works
-      transport = getCustomTransporter(opts.smtpConfig);
+      // Ethereal sender — use dedicated transporter so getTestMessageUrl works
+      transport = getEtherealTransporter(opts.smtpConfig);
       isRealDelivery = false;
     } else if (process.env.SMTP_HOST && process.env.SMTP_USER && !/ethereal/i.test(process.env.SMTP_HOST)) {
       // Env-level real SMTP
@@ -159,10 +170,7 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
       html: formattedHtml,
     });
 
-    const previewUrl = nodemailer.getTestMessageUrl(info) ||
-      (isEthereal && info.messageId
-        ? `https://ethereal.email/message/${info.messageId.replace(/[<>]/g, '')}`
-        : undefined);
+    const previewUrl = nodemailer.getTestMessageUrl(info) || undefined;
 
     return {
       success: true,

@@ -3,7 +3,7 @@ import IORedis from 'ioredis';
 import { db } from './db.js';
 import { sendEmail } from './mailer.js';
 import { sendSlackRateLimitAlert } from './slack.js';
-import { QueueHealthStats } from '../src/types.js';
+import { QueueHealthStats, EmailAttachment } from '../src/types.js';
 
 const QUEUE_NAME = 'email-dispatch';
 
@@ -27,6 +27,17 @@ export const emailBullQueue = new Queue(QUEUE_NAME, {
     backoff: { type: 'exponential', delay: 5000 },
   },
 });
+
+// Attachments live once per campaign. Cache the last few so a 1000-email campaign doesn't re-read ~10MB from Postgres per send.
+const attachmentCache = new Map<string, EmailAttachment[]>();
+async function getCampaignAttachments(campaignId: string): Promise<EmailAttachment[]> {
+  const hit = attachmentCache.get(campaignId);
+  if (hit) return hit;
+  const list = await db.getCampaignAttachments(campaignId);
+  attachmentCache.set(campaignId, list);
+  if (attachmentCache.size > 5) attachmentCache.delete(attachmentCache.keys().next().value as string);
+  return list;
+}
 
 // Track senders alerted this hour to avoid duplicate Slack pings
 const alertedSendersThisHour = new Set<string>();
@@ -131,7 +142,7 @@ const worker = new Worker(
         subject: email.subject,
         textBody: email.body,
         smtpConfig: sender?.smtpConfig,
-        attachments: (email as any).attachments || [],
+        attachments: await getCampaignAttachments(email.campaignId),
       });
 
       const nowIso = new Date().toISOString();

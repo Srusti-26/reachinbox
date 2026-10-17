@@ -12,6 +12,7 @@ import { emailQueue } from './server/queue.js';
 import { searchEmails } from './server/search.js';
 import { sendSlackRateLimitAlert, sendSlackTestMessage } from './server/slack.js';
 import { sendEmail, verifySmtpConnection } from './server/mailer.js';
+import { validateAttachments } from './server/attachments.js';
 import { Campaign, ScheduledEmailItem, SenderAccount } from './src/types.js';
 
 dotenv.config();
@@ -23,6 +24,7 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const isProduction = process.env.NODE_ENV === 'production';
 
+app.use('/api/v1/campaigns', express.json({ limit: '20mb' }));
 app.use(express.json({ limit: '10mb' }));
 app.use(cookieParser());
 app.use(
@@ -225,6 +227,9 @@ app.post('/api/v1/campaigns', requireAuth, async (req: Request, res: Response) =
   if (!Array.isArray(recipients) || recipients.length === 0)
     return res.status(400).json({ error: 'At least one recipient is required.' });
 
+  const checked = validateAttachments(attachments);
+  if (!checked.ok) return res.status(400).json({ error: checked.error });
+
   const userId = getUserId(req);
   const senders = await db.getSenders(userId);
   const selectedSender = senders.find((s) => s.email === senderEmail) || senders[0];
@@ -248,6 +253,7 @@ app.post('/api/v1/campaigns', requireAuth, async (req: Request, res: Response) =
     senderEmail: selectedSender.email,
     createdAt: new Date().toISOString(),
     status: 'active',
+    attachments: checked.attachments, // stored once on the campaign, not copied onto every email
   };
 
   await db.addCampaign(newCampaign);
@@ -273,7 +279,6 @@ app.post('/api/v1/campaigns', requireAuth, async (req: Request, res: Response) =
       senderEmail: selectedSender.email,
       senderName: selectedSender.name,
       delaySeconds: Number(delaySeconds) || 30,
-      attachments: attachments || [],
     };
   });
 

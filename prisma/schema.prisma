@@ -37,6 +37,7 @@ model Campaign {
   delayBetweenEmailsSeconds Int      @default(30)
   hourlyLimit               Int      @default(200)
   senderEmail               String
+  attachments               Json?
   status                    String   @default("active")
   createdAt                 DateTime @default(now())
   updatedAt                 DateTime @updatedAt

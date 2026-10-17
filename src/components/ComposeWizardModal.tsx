@@ -97,11 +97,21 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
 
   const handleAttachmentUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    const MAX_FILE = 5 * 1024 * 1024;
+    const MAX_TOTAL = 10 * 1024 * 1024; // server enforces the same limits
+    let runningTotal = attachments.reduce((n, a) => n + a.size, 0);
+
     files.forEach((file) => {
-      if (file.size > 5 * 1024 * 1024) {
+      if (file.size > MAX_FILE) {
         setErrorMsg(`File "${file.name}" exceeds 5MB limit.`);
         return;
       }
+      if (runningTotal + file.size > MAX_TOTAL) {
+        setErrorMsg('Attachments can total at most 10MB.');
+        return;
+      }
+      runningTotal += file.size;
       const reader = new FileReader();
       reader.onload = (ev) => {
         const base64 = (ev.target?.result as string).split(',')[1];
@@ -110,9 +120,9 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
           { filename: file.name, content: base64, contentType: file.type || 'application/octet-stream', size: file.size },
         ]);
       };
+      reader.onerror = () => setErrorMsg(`Could not read "${file.name}".`);
       reader.readAsDataURL(file);
     });
-    e.target.value = '';
   };
 
   const removeAttachment = (idx: number) => {
@@ -258,6 +268,7 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
       }
 
       onCampaignCreated();
+      setAttachments([]);
       onClose();
     } catch (err: any) {
       setErrorMsg(err.message || 'Error scheduling emails');

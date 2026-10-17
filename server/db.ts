@@ -1,9 +1,16 @@
 import { PrismaClient } from '@prisma/client';
-import { ScheduledEmailItem, Campaign, SenderAccount, SlackConfig, UserProfile } from '../src/types.js';
+import { ScheduledEmailItem, EmailAttachment, Campaign, SenderAccount, SlackConfig, UserProfile } from '../src/types.js';
 
 const prisma = new PrismaClient();
 
 export { prisma };
+
+// Campaign columns for normal reads. Excludes `attachments` (base64, up to ~10MB) so list/counter queries stay light.
+const CAMPAIGN_SELECT = {
+  id: true, userId: true, name: true, subject: true, body: true, totalRecipients: true, scheduledCount: true,
+  sentCount: true, failedCount: true, startTime: true, delayBetweenEmailsSeconds: true, hourlyLimit: true,
+  senderEmail: true, status: true, createdAt: true, updatedAt: true,
+} as const;
 
 // ─── Type helpers ────────────────────────────────────────────────────────────
 
@@ -209,6 +216,7 @@ class Database {
     const rows = await prisma.campaign.findMany({
       where: userId ? { userId } : undefined,
       orderBy: { createdAt: 'desc' },
+      select: CAMPAIGN_SELECT,
     });
     return rows.map(mapCampaign);
   }
@@ -230,14 +238,22 @@ class Database {
         hourlyLimit: campaign.hourlyLimit,
         senderEmail: campaign.senderEmail,
         status: campaign.status,
+        ...(campaign.attachments?.length ? { attachments: campaign.attachments as any } : {}),
       },
     });
+  }
+
+  /** Attachments for a campaign (empty list if none). Called by the worker when sending. */
+  async getCampaignAttachments(campaignId: string): Promise<EmailAttachment[]> {
+    const row = await prisma.campaign.findUnique({ where: { id: campaignId }, select: { attachments: true } });
+    return ((row?.attachments as unknown) as EmailAttachment[] | null) ?? [];
   }
 
   async updateCampaign(id: string, partial: Partial<Campaign>): Promise<Campaign | null> {
     try {
       const row = await prisma.campaign.update({
         where: { id },
+        select: CAMPAIGN_SELECT,
         data: {
           ...(partial.sentCount !== undefined && { sentCount: partial.sentCount }),
           ...(partial.failedCount !== undefined && { failedCount: partial.failedCount }),

@@ -44,6 +44,7 @@ export interface Campaign {
   senderEmail: string;
   createdAt: string;
   status: 'active' | 'completed' | 'paused' | 'cancelled';
+  attachments?: EmailAttachment[]; // stored once per campaign, loaded by the worker at send time
 }
 
 export interface EmailAttachment {

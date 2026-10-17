@@ -1,0 +1,139 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String
+  avatarUrl String?
+  googleId  String?  @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaigns Campaign[]
+  senders   SenderAccount[]
+  slack     SlackIntegration?
+
+  @@map("users")
+}
+
+model Campaign {
+  id                        String   @id @default(uuid())
+  userId                    String
+  name                      String
+  subject                   String
+  body                      String   @db.Text
+  totalRecipients           Int      @default(0)
+  scheduledCount            Int      @default(0)
+  sentCount                 Int      @default(0)
+  failedCount               Int      @default(0)
+  startTime                 DateTime
+  delayBetweenEmailsSeconds Int      @default(30)
+  hourlyLimit               Int      @default(200)
+  senderEmail               String
+  attachments               Json?
+  status                    String   @default("active")
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  user   User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emails ScheduledEmail[]
+
+  @@map("campaigns")
+}
+
+model ScheduledEmail {
+  id                 String    @id
+  campaignId         String
+  recipientEmail     String
+  recipientName      String?
+  subject            String
+  body               String    @db.Text
+  scheduledTime      DateTime
+  sentTime           DateTime?
+  status             String    @default("scheduled")
+  senderEmail        String
+  senderName         String
+  etherealPreviewUrl String?
+  error              String?   @db.Text
+  jobId              String?   @unique
+  delaySeconds       Int       @default(30)
+  idempotencyKey     String?   @unique
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([recipientEmail])
+  @@index([scheduledTime, status])
+  @@index([senderEmail])
+  @@map("scheduled_emails")
+}
+
+model SenderAccount {
+  id                    String   @id
+  userId                String
+  email                 String
+  name                  String
+  isDefault             Boolean  @default(false)
+  type                  String   @default("ethereal")
+  hourlyLimit           Int      @default(200)
+  emailsSentCurrentHour Int      @default(0)
+  isLiveDelivery        Boolean  @default(false)
+  smtpConfig            String?  @db.Text
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, email])
+  @@map("sender_accounts")
+}
+
+model SlackIntegration {
+  id                       String    @id @default(uuid())
+  userId                   String    @unique
+  connected                Boolean   @default(false)
+  webhookUrl               String?
+  channelName              String?
+  teamName                 String?
+  accessToken              String?
+  notifyOnRateLimit        Boolean   @default(true)
+  notifyOnFailure          Boolean   @default(true)
+  notifyOnCampaignComplete Boolean   @default(true)
+  lastNotifiedAt           DateTime?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("slack_integrations")
+}
+
+model HourlyRateLimit {
+  id          String   @id @default(uuid())
+  senderEmail String
+  hourKey     String
+  count       Int      @default(0)
+  updatedAt   DateTime @updatedAt
+
+  @@unique([senderEmail, hourKey])
+  @@map("hourly_rate_limits")
+}
+
+model AppSettings {
+  id                          String   @id @default(uuid())
+  workerConcurrency           Int      @default(5)
+  minDelayBetweenEmailsSeconds Int     @default(30)
+  maxEmailsPerHour            Int      @default(1000)
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
+
+  @@map("app_settings")
+}

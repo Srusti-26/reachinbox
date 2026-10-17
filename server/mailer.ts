@@ -41,6 +41,8 @@ export async function getEtherealSharedTransporter(): Promise<Transporter> {
   }
   return etherealSharedTransporter!;
 }
+
+export function getCustomTransporter(config: SmtpConfig): Transporter {
   const cacheKey = `${config.host}:${config.port}:${config.user}`;
   if (cachedTransporters.has(cacheKey)) {
     return cachedTransporters.get(cacheKey)!;

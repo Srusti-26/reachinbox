@@ -225,7 +225,7 @@ app.get('/api/v1/campaigns', requireAuth, async (req: Request, res: Response) =>
 });
 
 app.post('/api/v1/campaigns', requireAuth, async (req: Request, res: Response) => {
-  const { subject, body, recipients, startTime, delaySeconds, hourlyLimit, senderEmail } = req.body;
+  const { subject, body, recipients, startTime, delaySeconds, hourlyLimit, senderEmail, attachments } = req.body;
 
   if (!subject || !body) return res.status(400).json({ error: 'Subject and body are required.' });
   if (!Array.isArray(recipients) || recipients.length === 0)
@@ -295,7 +295,7 @@ app.post('/api/v1/campaigns', requireAuth, async (req: Request, res: Response) =
   await db.addEmails(emailItems);
 
   // Rows are committed first. If we crash before/while enqueuing, reconcileQueue() on boot re-creates the missing jobs.
-  for (const item of emailItems) await emailQueue.addEmailJob(item.id, new Date(item.scheduledTime));
+  for (const item of emailItems) await emailQueue.addEmailJob(item.id, new Date(item.scheduledTime), attachments);
   void indexEmails(userId, emailItems); // best-effort, non-blocking
 
   res.status(201).json({ success: true, campaign: newCampaign, scheduledCount: emailItems.length, skipped: recipients.length - leads.length });

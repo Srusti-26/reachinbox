@@ -30,7 +30,7 @@ export const emailBullQueue = new Queue(QUEUE_NAME, {
  * Over the cap the SAME job is moved to the next hour window (DelayedError); it is never failed or dropped.
  */
 async function processor(job: Job, token?: string) {
-  const { emailId } = job.data as { emailId: string };
+  const { emailId, attachments } = job.data as { emailId: string; attachments?: { filename: string; content: string; contentType: string }[] };
 
   const ctx = await db.getEmailForWorker(emailId);
   if (!ctx) {
@@ -80,7 +80,8 @@ async function processor(job: Job, token?: string) {
       subject: email.subject,
       textBody: email.body,
       smtpConfig: sender?.smtpConfig,
-      messageId: `<${emailId}@reachinbox.local>`, // stable id: same email => same Message-ID
+      messageId: `<${emailId}@reachinbox.local>`,
+      attachments: attachments?.map((a) => ({ filename: a.filename, content: Buffer.from(a.content, 'base64'), contentType: a.contentType })),
     });
     if (!result.success) throw new Error(result.error || 'SMTP delivery failed');
 
@@ -150,7 +151,7 @@ export async function reconcileQueue(): Promise<{ reset: number; pending: number
  * Add or re-time the job for an email. jobId === emailId, so a second add can't create a duplicate.
  * Finished jobs are removed first (BullMQ otherwise ignores the add and a retry silently does nothing).
  */
-async function upsertJob(emailId: string, runAt: Date, opts: { retime?: boolean } = {}): Promise<void> {
+async function upsertJob(emailId: string, runAt: Date, opts: { retime?: boolean } = {}, attachments?: { filename: string; content: string; contentType: string }[]): Promise<void> {
   const delay = Math.max(0, runAt.getTime() - Date.now());
   const existing = await emailBullQueue.getJob(emailId);
   if (existing) {
@@ -159,14 +160,14 @@ async function upsertJob(emailId: string, runAt: Date, opts: { retime?: boolean 
     else if (state === 'delayed' && opts.retime) {
       await existing.changeDelay(delay);
       return;
-    } else return; // waiting / active / delayed: leave it
+    } else return;
   }
-  await emailBullQueue.add('send-email', { emailId }, { delay, jobId: emailId });
+  await emailBullQueue.add('send-email', { emailId, attachments }, { delay, jobId: emailId });
 }
 
 export const emailQueue = {
-  async addEmailJob(emailId: string, scheduledTime: Date): Promise<void> {
-    await upsertJob(emailId, scheduledTime);
+  async addEmailJob(emailId: string, scheduledTime: Date, attachments?: { filename: string; content: string; contentType: string }[]): Promise<void> {
+    await upsertJob(emailId, scheduledTime, {}, attachments);
   },
 
   async retryEmail(id: string): Promise<boolean> {

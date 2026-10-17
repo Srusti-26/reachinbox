@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+﻿import React, { useState, useRef } from 'react';
 import {
   X,
   Check,
@@ -51,6 +51,27 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  interface AttachmentFile { filename: string; content: string; contentType: string; size: number; }
+  const [attachments, setAttachments] = useState<AttachmentFile[]>([]);
+  const attachInputRef = useRef<HTMLInputElement>(null);
+
+  const handleAttachmentAdd = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    files.forEach((file) => {
+      if (file.size > 5 * 1024 * 1024) { setErrorMsg(`${file.name} exceeds 5 MB limit.`); return; }
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const base64 = (ev.target?.result as string).split(',')[1];
+        setAttachments((prev) => [...prev.filter((a) => a.filename !== file.name), { filename: file.name, content: base64, contentType: file.type || 'application/octet-stream', size: file.size }]);
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = '';
+  };
+
+  const removeAttachment = (filename: string) => setAttachments((prev) => prev.filter((a) => a.filename !== filename));
+  const formatBytes = (b: number) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(1)} MB`;
+
   // Step 3
   const [scheduleMode, setScheduleMode] = useState<'immediate' | 'custom'>('custom');
   const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
@@ -91,12 +112,21 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
     const seen = new Set<string>();
     const valid: RecipientItem[] = [];
     let invalids = 0, dups = 0;
+    let isFirstRow = true;
     for (const rawLine of text.split(/\r?\n/)) {
-      const parts = rawLine.trim().split(',');
-      const email = parts[0]?.replace(/["']/g, '').trim().toLowerCase();
-      const name = parts[1]?.replace(/["']/g, '').trim() || '';
-      if (!email || email === 'email') continue;
-      if (!emailRegex.test(email)) { invalids++; continue; }
+      const parts = rawLine.trim().split(',').map(p => p.replace(/["']/g, '').trim());
+      if (!parts.some(Boolean)) continue;
+      // Skip header row: if no cell looks like an email, it's a header
+      if (isFirstRow) {
+        isFirstRow = false;
+        if (!parts.some(p => emailRegex.test(p.toLowerCase()))) continue;
+      }
+      // Find the email in any column
+      const emailCol = parts.find(p => emailRegex.test(p.toLowerCase()));
+      if (!emailCol) { invalids++; continue; }
+      const email = emailCol.toLowerCase();
+      // Name: first non-email column, or empty
+      const name = parts.find(p => p && !emailRegex.test(p.toLowerCase())) || '';
       if (seen.has(email)) { dups++; continue; }
       seen.add(email);
       valid.push({ email, name });
@@ -139,6 +169,7 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
           startTime: startDateTime.toISOString(),
           delaySeconds, hourlyLimit,
           senderEmail: selectedSenderEmail,
+          attachments: attachments.length > 0 ? attachments : undefined,
         }),
       });
       const data = await res.json();
@@ -247,7 +278,7 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
                     <div className="w-px h-4 bg-slate-300 mx-1" />
                     <button type="button" onClick={() => insertFormatting('[', '](https://)')} className="p-1.5 hover:bg-slate-200 rounded-lg transition-colors"><Link2 className="w-4 h-4" /></button>
                     <button type="button" onClick={() => insertFormatting('\n1. ')} className="p-1.5 hover:bg-slate-200 rounded-lg transition-colors"><ListOrdered className="w-4 h-4" /></button>
-                    <button type="button" onClick={() => insertFormatting('\n• ')} className="p-1.5 hover:bg-slate-200 rounded-lg transition-colors"><List className="w-4 h-4" /></button>
+                    <button type="button" onClick={() => insertFormatting('\nâ€¢ ')} className="p-1.5 hover:bg-slate-200 rounded-lg transition-colors"><List className="w-4 h-4" /></button>
                   </div>
                   <textarea
                     rows={8}
@@ -275,6 +306,32 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
                   <code className="text-[#5125F5] font-mono">{'{{name}}'}</code> is replaced with each recipient's name.
                 </div>
               </div>
+
+              {/* Attachments row */}
+              <div className="lg:col-span-12">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider">
+                    Attachments <span className="text-slate-400 font-normal normal-case">(optional, max 5 MB each)</span>
+                  </label>
+                  <button type="button" onClick={() => attachInputRef.current?.click()} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[#5125F5] bg-[#F0EEFF] hover:bg-[#5125F5]/15 rounded-lg transition-colors">
+                    + Add File
+                  </button>
+                  <input ref={attachInputRef} type="file" multiple onChange={handleAttachmentAdd} className="hidden" />
+                </div>
+                {attachments.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {attachments.map((a) => (
+                      <div key={a.filename} className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-700">
+                        <span className="font-medium truncate max-w-[160px]">{a.filename}</span>
+                        <span className="text-slate-400">{formatBytes(a.size)}</span>
+                        <button type="button" onClick={() => removeAttachment(a.filename)} className="text-slate-400 hover:text-rose-500 transition-colors ml-1">x</button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-slate-400">No attachments added. PDFs, images, docs, up to 5 MB each.</p>
+                )}
+              </div>
             </div>
           )}
 
@@ -283,7 +340,7 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
             <div className="max-w-2xl mx-auto space-y-5">
               <div>
                 <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider mb-2">
-                  To — Recipient Emails <span className="text-rose-500">*</span>
+                  To - Recipient Emails <span className="text-rose-500">*</span>
                 </label>
                 <textarea
                   rows={6}
@@ -327,8 +384,8 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
                   <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0" />
                   <div className="text-xs text-emerald-800">
                     <span className="font-bold">{recipients.length} valid recipient{recipients.length !== 1 ? 's' : ''}</span>
-                    {duplicateCount > 0 && ` · ${duplicateCount} duplicate${duplicateCount !== 1 ? 's' : ''} removed`}
-                    {invalidCount > 0 && ` · ${invalidCount} invalid skipped`}
+                    {duplicateCount > 0 && ` Â· ${duplicateCount} duplicate${duplicateCount !== 1 ? 's' : ''} removed`}
+                    {invalidCount > 0 && ` Â· ${invalidCount} invalid skipped`}
                   </div>
                 </div>
               )}
@@ -352,7 +409,7 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
                         : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
                     }`}
                   >
-                    ⚡ Send Immediately
+                    âš¡ Send Immediately
                   </button>
                   <button
                     type="button"
@@ -396,7 +453,7 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
                       </div>
                     </div>
                     <div className="p-3 bg-[#F0EEFF] border border-[#5125F5]/20 rounded-xl text-xs text-[#5125F5] font-medium">
-                      📅 Will send on: {scheduledLabel}
+                      ðŸ“… Will send on: {scheduledLabel}
                     </div>
                   </div>
                 )}
@@ -432,7 +489,7 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
                 </label>
                 {senders.length === 0 ? (
                   <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800">
-                    No sender configured yet — one will be auto-provisioned when you submit.
+                    No sender configured yet - one will be auto-provisioned when you submit.
                   </div>
                 ) : (
                   <select
@@ -442,7 +499,7 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
                   >
                     {senders.map((s) => (
                       <option key={s.id} value={s.email}>
-                        {s.name} ({s.email}) — {s.smtpConfig?.host ? `[SMTP: ${s.smtpConfig.host}]` : '[Sandbox]'}
+                        {s.name} ({s.email}) - {s.smtpConfig?.host ? `[SMTP: ${s.smtpConfig.host}]` : '[Sandbox]'}
                       </option>
                     ))}
                   </select>
@@ -455,7 +512,7 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
                 </div>
                 <div>
                   <div className="text-sm font-bold text-[#101A33]">
-                    {recipients.length} email{recipients.length !== 1 ? 's' : ''} → {scheduledLabel}
+                    {recipients.length} email{recipients.length !== 1 ? 's' : ''} â†’ {scheduledLabel}
                   </div>
                   <div className="text-xs text-slate-500 mt-0.5">
                     BullMQ will hold the jobs in Redis until the scheduled time.

@@ -41,13 +41,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [concurrency, setConcurrency] = useState(5);
   const [minDelay, setMinDelay] = useState(30);
   const [maxPerHour, setMaxPerHour] = useState(1000);
+
+  React.useEffect(() => {
+    fetch('/api/v1/settings')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.settings) {
+          setConcurrency(d.settings.workerConcurrency);
+          setMinDelay(d.settings.minDelayBetweenEmailsSeconds);
+          setMaxPerHour(d.settings.maxEmailsPerHour);
+        }
+      })
+      .catch(() => {});
+  }, []);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   // New SMTP / Sender Form State
   const [showAddSenderModal, setShowAddSenderModal] = useState(false);
-  const [senderName, setSenderName] = useState('Srusti Outreach');
-  const [senderEmail, setSenderEmail] = useState(user.email || '1nt23ad052.srusti@nmit.ac.in');
+  const [senderName, setSenderName] = useState('My Outreach');
+  const [senderEmail, setSenderEmail] = useState(user.email || '');
   const [smtpHost, setSmtpHost] = useState('smtp.gmail.com');
   const [smtpPort, setSmtpPort] = useState(587);
   const [smtpSecure, setSmtpSecure] = useState(false);
@@ -195,14 +208,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             Configure sender mailboxes, real SMTP servers, queue concurrency, and Slack notifications.
           </p>
         </div>
-
-        <button
-          onClick={onOpenSendRealModal}
-          className="flex items-center gap-2 px-4 py-2.5 text-xs font-semibold text-white bg-gradient-to-r from-[#5125F5] to-[#7B57F8] hover:opacity-95 rounded-xl shadow-md shadow-[#5125F5]/20 transition-all"
-        >
-          <Zap className="w-4 h-4 fill-white" />
-          <span>Send Real Test Email</span>
-        </button>
       </div>
 
       {/* Account Info */}

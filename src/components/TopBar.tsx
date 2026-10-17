@@ -138,14 +138,10 @@ export const TopBar: React.FC<TopBarProps> = ({
             className="flex items-center gap-3 p-1.5 rounded-xl hover:bg-slate-50 transition-colors text-left"
           >
             <img
-              src={user.avatarUrl || '/src/assets/images/srusti_avatar_1792219223879.jpg'}
+              src={user.avatarUrl || `https://ui-avatars.com/api/?name=${encodeURIComponent(user.name || 'U')}&background=5125F5&color=fff&size=40`}
               alt={user.name}
               referrerPolicy="no-referrer"
               className="w-10 h-10 rounded-full object-cover border border-slate-200 shadow-xs"
-              onError={(e) => {
-                // Fallback avatar if load fails
-                (e.target as HTMLElement).style.display = 'none';
-              }}
             />
             <div className="hidden sm:block">
               <div className="text-sm font-semibold text-slate-900 leading-tight">

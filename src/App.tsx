@@ -21,6 +21,12 @@ import {
 } from './types.js';
 
 export default function App() {
+  const getGreeting = () => {
+    const h = new Date().getHours();
+    if (h < 12) return 'Good morning';
+    if (h < 17) return 'Good afternoon';
+    return 'Good evening';
+  };
   // Navigation & Modal State
   const [currentTab, setCurrentTab] = useState<NavTab>('dashboard');
   const [tableActiveTab, setTableActiveTab] = useState<'scheduled' | 'sent'>('scheduled');
@@ -28,7 +34,7 @@ export default function App() {
   const [slackModalOpen, setSlackModalOpen] = useState(false);
   const [queueModalOpen, setQueueModalOpen] = useState(false);
   const [loginModalOpen, setLoginModalOpen] = useState(false);
-  const [sendRealModalOpen, setSendRealModalOpen] = useState(false);
+
   const [selectedPreviewEmail, setSelectedPreviewEmail] = useState<ScheduledEmailItem | null>(null);
   const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -41,37 +47,26 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 4000);
   };
 
-  // Data State
+  // Data State — start empty; real values come from the API
   const [user, setUser] = useState<UserProfile>({
-    id: 'usr_srusti_01',
-    name: 'Srusti',
-    email: '1nt23ad052.srusti@nmit.ac.in',
-    avatarUrl: '/src/assets/images/srusti_avatar_1792219223879.jpg',
+    id: '',
+    name: '',
+    email: '',
     role: 'Campaign Lead',
     createdAt: new Date().toISOString(),
   });
 
   const [stats, setStats] = useState<CampaignStats>({
-    scheduledEmails: 256,
-    sentEmails: 189,
-    failedEmails: 12,
-    openRatePercent: 67,
-    openRateDelta: 12,
-    hourlySentCount: 200,
+    scheduledEmails: 0,
+    sentEmails: 0,
+    failedEmails: 0,
+    openRatePercent: 0,
+    openRateDelta: 0,
+    hourlySentCount: 0,
     hourlyLimit: 1000,
   });
 
-  const [senders, setSenders] = useState<SenderAccount[]>([
-    {
-      id: 'snd_default',
-      email: 'srusti@reachinbox.ai',
-      name: 'Srusti at ReachInbox',
-      isDefault: true,
-      type: 'ethereal',
-      hourlyLimit: 200,
-      emailsSentCurrentHour: 200,
-    },
-  ]);
+  const [senders, setSenders] = useState<SenderAccount[]>([]);
 
   const [slackConfig, setSlackConfig] = useState<SlackConfig>({
     connected: false,
@@ -94,10 +89,12 @@ export default function App() {
   const fetchInitialData = useCallback(async () => {
     try {
       const authRes = await fetch('/api/v1/auth/me');
-      if (authRes.ok) {
-        const authData = await authRes.json();
-        if (authData.user) setUser(authData.user);
+      if (!authRes.ok) {
+        setLoginModalOpen(true);
+        return;
       }
+      const authData = await authRes.json();
+      if (authData.user) setUser(authData.user);
 
       const settingsRes = await fetch('/api/v1/settings');
       if (settingsRes.ok) {
@@ -108,6 +105,25 @@ export default function App() {
     } catch (e) {
       console.warn('Initial data fetch notice:', e);
     }
+  }, []);
+
+  // Result of the Slack OAuth redirect (?slack=connected|denied|failed|invalid_state|not_configured)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get('slack');
+    if (!result) return;
+    const messages: Record<string, [string, 'success' | 'error']> = {
+      connected: ['Slack connected. Rate-limit alerts will now post to your channel.', 'success'],
+      denied: ['Slack connection was cancelled.', 'error'],
+      failed: ['Slack connection failed. Please try again.', 'error'],
+      invalid_state: ['Slack connection could not be verified. Please try again.', 'error'],
+      not_configured: ['Slack OAuth is not configured on the server (set SLACK_CLIENT_ID / SLACK_CLIENT_SECRET).', 'error'],
+    };
+    const [text, type] = messages[result] ?? ['Slack: unknown result.', 'error'];
+    showToast(text, type);
+    if (result === 'connected') fetchInitialData();
+    window.history.replaceState({}, '', window.location.pathname);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Fetch Dashboard Stats
@@ -234,6 +250,10 @@ export default function App() {
 
   const handleLogout = async () => {
     await fetch('/api/v1/auth/logout', { method: 'POST' });
+    setUser({ id: '', name: '', email: '', role: 'Campaign Lead', createdAt: new Date().toISOString() });
+    setSenders([]);
+    setEmails([]);
+    setStats({ scheduledEmails: 0, sentEmails: 0, failedEmails: 0, openRatePercent: 0, openRateDelta: 0, hourlySentCount: 0, hourlyLimit: 1000 });
     setLoginModalOpen(true);
   };
 
@@ -286,7 +306,7 @@ export default function App() {
               senders={senders}
               slackConfig={slackConfig}
               onOpenSlackModal={() => setSlackModalOpen(true)}
-              onOpenSendRealModal={() => setSendRealModalOpen(true)}
+              onOpenSendRealModal={() => {}}
               onRefresh={() => {
                 fetchInitialData();
                 fetchStats();
@@ -302,7 +322,7 @@ export default function App() {
                       ? 'Sent Emails'
                       : currentTab === 'scheduled'
                       ? 'Scheduled Emails'
-                      : `Good morning, ${user.name}! 👋`}
+                      : `${getGreeting()}, ${user.name || 'there'}! 👋`}
                   </h1>
                   <p className="text-xs sm:text-sm text-slate-500 mt-1">
                     {currentTab === 'sent'
@@ -315,14 +335,6 @@ export default function App() {
 
                 {/* Action buttons */}
                 <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => setSendRealModalOpen(true)}
-                    className="flex items-center gap-2 px-4 py-3 text-sm font-semibold text-[#5125F5] bg-white hover:bg-slate-50 border border-slate-200/90 rounded-xl shadow-xs hover:shadow-sm transition-all"
-                  >
-                    <Zap className="w-4 h-4 text-[#5125F5] fill-[#5125F5]" />
-                    <span>Send Real Email</span>
-                  </button>
-
                   <button
                     onClick={() => setComposeModalOpen(true)}
                     className="flex items-center gap-2 px-5 py-3 text-sm font-semibold text-white bg-[#5125F5] hover:bg-[#431dd6] rounded-xl shadow-md shadow-[#5125F5]/30 hover:shadow-lg transition-all transform active:scale-98"
@@ -404,15 +416,11 @@ export default function App() {
       />
 
       <SendRealEmailModal
-        isOpen={sendRealModalOpen}
-        onClose={() => setSendRealModalOpen(false)}
+        isOpen={false}
+        onClose={() => {}}
         senders={senders}
         defaultRecipient={user.email}
-        onEmailSent={() => {
-          fetchEmails();
-          fetchStats();
-          showToast('Real email dispatched successfully!', 'success');
-        }}
+        onEmailSent={() => {}}
         onOpenSettings={() => setCurrentTab('settings')}
       />
     </div>

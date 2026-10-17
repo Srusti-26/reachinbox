@@ -65,15 +65,25 @@ export const QueueMonitorModal: React.FC<QueueMonitorModalProps> = ({ isOpen, on
             </div>
             <div>
               <h3 className="text-base font-bold tracking-tight">
-                Bull Board Live Queue Monitor
+                BullMQ Live Queue Monitor
               </h3>
               <p className="text-xs text-slate-400">
-                Queue: <code className="text-purple-300">email-dispatch-queue</code> (Redis Delayed Jobs)
+                Queue: <code className="text-purple-300">email-dispatch</code> · Redis Delayed Jobs
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
+            <a
+              href="/admin/queues"
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#5125F5] hover:bg-[#431dd6] rounded-lg transition-colors"
+              title="Open Bull Board"
+            >
+              <Server className="w-3.5 h-3.5" />
+              <span>Bull Board</span>
+            </a>
             <button
               onClick={fetchHealth}
               disabled={loading}
@@ -174,9 +184,9 @@ export const QueueMonitorModal: React.FC<QueueMonitorModalProps> = ({ isOpen, on
           {/* Rate Limit and Concurrency Info */}
           <div className="p-5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2 text-xs">
             <div className="flex items-center justify-between text-slate-700">
-              <span className="font-medium">Rate Limiting Protection:</span>
-              <span className="font-semibold text-slate-900">
-                {stats?.rateLimitPaused ? 'PAUSED (Quota Reached)' : 'Active (Automatic Rescheduling)'}
+              <span className="font-medium">Rate Limiting:</span>
+              <span className={`font-semibold ${stats?.rateLimitPaused ? 'text-rose-600' : 'text-emerald-700'}`}>
+                {stats?.rateLimitPaused ? '⏸ Paused — quota reached, jobs rescheduled' : '✅ Active — auto-reschedule on cap'}
               </span>
             </div>
             {stats?.nextEligibleSendTime && (
@@ -192,10 +202,25 @@ export const QueueMonitorModal: React.FC<QueueMonitorModalProps> = ({ isOpen, on
               <span className="font-mono">{stats?.concurrency ?? 5} simultaneous jobs</span>
             </div>
             <div className="flex items-center justify-between text-slate-700">
-              <span className="font-medium">Idempotency Protection:</span>
-              <span className="text-emerald-700 font-medium">Enabled (Deduplication Key Active)</span>
+              <span className="font-medium">Idempotency:</span>
+              <span className="text-emerald-700 font-medium">✅ jobId = emailId (no duplicate sends)</span>
+            </div>
+            <div className="flex items-center justify-between text-slate-700">
+              <span className="font-medium">Min delay between sends:</span>
+              <span className="font-mono">2 000 ms (BullMQ limiter)</span>
             </div>
           </div>
+
+          {/* Bull Board CTA */}
+          <a
+            href="/admin/queues"
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center justify-center gap-2 w-full py-3 text-sm font-semibold text-[#5125F5] bg-[#F0EEFF] hover:bg-[#5125F5]/15 rounded-2xl border border-[#5125F5]/20 transition-colors"
+          >
+            <Server className="w-4 h-4" />
+            <span>Open Full Bull Board Dashboard →</span>
+          </a>
         </div>
       </div>
     </div>

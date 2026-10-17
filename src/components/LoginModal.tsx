@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { ShieldCheck } from 'lucide-react';
 
 interface LoginModalProps {
@@ -7,6 +7,14 @@ interface LoginModalProps {
 }
 
 export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onLoginSuccess }) => {
+  const [devLogin, setDevLogin] = useState(false);
+  useEffect(() => {
+    fetch('/api/v1/auth/config')
+      .then((r) => r.json())
+      .then((c) => setDevLogin(!!c.devLogin))
+      .catch(() => setDevLogin(false));
+  }, []);
+
   if (!isOpen) return null;
 
   const handleGoogleSignIn = () => {
@@ -23,14 +31,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onLoginSuccess }
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-xs"
-      onClick={onLoginSuccess}
     >
       <div
         className="relative w-full max-w-md max-h-[88vh] overflow-y-auto bg-white rounded-3xl shadow-xl border border-slate-200/80 p-8 sm:p-10 text-center my-auto animate-in fade-in zoom-in-95 duration-150"
         onClick={(e) => e.stopPropagation()}
       >
         <button
-          onClick={onLoginSuccess}
+          onClick={() => {}}
           className="absolute top-4 right-4 p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
           aria-label="Close"
         >
@@ -92,12 +99,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onLoginSuccess }
           <span>Continue with Google</span>
         </button>
 
-        <button
-          onClick={handleDevLogin}
-          className="w-full py-2 text-xs text-slate-400 hover:text-slate-600 transition-colors mb-4"
-        >
-          Dev mode: skip OAuth
-        </button>
+        {devLogin && (
+          <button
+            onClick={handleDevLogin}
+            className="w-full py-2 text-xs text-slate-400 hover:text-slate-600 transition-colors mb-4"
+          >
+            Dev mode: skip OAuth (local only)
+          </button>
+        )}
 
         {/* Footer disclaimer matching reference */}
         <p className="text-[11px] text-slate-400 leading-relaxed">

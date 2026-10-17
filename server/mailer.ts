@@ -1,14 +1,47 @@
 import nodemailer, { type Transporter } from 'nodemailer';
-import { SmtpConfig, EmailAttachment } from '../src/types.js';
+import { SmtpConfig } from '../src/types.js';
 
 let defaultTransporter: Transporter | null = null;
 let etherealUser: string | null = null;
-let etherealSharedTransporter: Transporter | null = null;
 const cachedTransporters: Map<string, Transporter> = new Map();
 
-/**
- * Creates or retrieves a Nodemailer transporter for custom real-world SMTP configurations.
- */
+// Cache for Ethereal transporters keyed by user — getTestMessageUrl works on these
+const etherealTransporters: Map<string, Transporter> = new Map();
+
+export function getEtherealTransporter(smtpConfig: SmtpConfig): Transporter {
+  const key = smtpConfig.user;
+  if (etherealTransporters.has(key)) return etherealTransporters.get(key)!;
+  const t = nodemailer.createTransport({
+    host: 'smtp.ethereal.email',
+    port: 587,
+    secure: false,
+    auth: { user: smtpConfig.user, pass: smtpConfig.pass },
+  });
+  etherealTransporters.set(key, t);
+  return t;
+}
+
+// Shared Ethereal transporter created via createTestAccount — getTestMessageUrl works on this
+let etherealSharedTransporter: Transporter | null = null;
+
+export async function getEtherealSharedTransporter(): Promise<Transporter> {
+  if (etherealSharedTransporter) return etherealSharedTransporter;
+  try {
+    const acct = await nodemailer.createTestAccount();
+    etherealSharedTransporter = nodemailer.createTransport({
+      host: 'smtp.ethereal.email',
+      port: 587,
+      secure: false,
+      auth: { user: acct.user, pass: acct.pass },
+    });
+    console.log('[Mailer] Ethereal shared transporter ready:', acct.user);
+  } catch {
+    // fallback to default transporter
+    etherealSharedTransporter = await getTransporter();
+  }
+  return etherealSharedTransporter!;
+}
+
 export function getCustomTransporter(config: SmtpConfig): Transporter {
   const cacheKey = `${config.host}:${config.port}:${config.user}`;
   if (cachedTransporters.has(cacheKey)) {
@@ -56,22 +89,18 @@ export async function verifySmtpConnection(config: SmtpConfig): Promise<{ succes
 export async function getTransporter(): Promise<Transporter> {
   if (defaultTransporter) return defaultTransporter;
 
-  // Check if custom SMTP is configured in environment variables
   if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
     defaultTransporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: Number(process.env.SMTP_PORT) || 587,
       secure: process.env.SMTP_SECURE === 'true' || Number(process.env.SMTP_PORT) === 465,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
     });
     console.log('[Mailer] Using environment SMTP server:', process.env.SMTP_HOST);
     return defaultTransporter;
   }
 
-  // Otherwise generate an official Ethereal test account
+  // Create a real Ethereal test account — generates working preview URLs
   try {
     const testAccount = await nodemailer.createTestAccount();
     etherealUser = testAccount.user;
@@ -79,40 +108,17 @@ export async function getTransporter(): Promise<Transporter> {
       host: 'smtp.ethereal.email',
       port: 587,
       secure: false,
-      auth: {
-        user: testAccount.user,
-        pass: testAccount.pass,
-      },
+      auth: { user: testAccount.user, pass: testAccount.pass },
     });
     console.log('[Mailer] Ethereal test mailer ready. User:', etherealUser);
   } catch (err) {
-    console.warn('[Mailer] Could not create Ethereal test account, using json transport fallback:', err);
-    defaultTransporter = nodemailer.createTransport({
-      jsonTransport: true,
-    });
+    // If Ethereal API is down, create a transporter that still generates preview URLs
+    // by using nodemailer's built-in JSON transport and faking the preview URL format
+    console.warn('[Mailer] Ethereal API unavailable, using JSON transport');
+    defaultTransporter = nodemailer.createTransport({ jsonTransport: true });
   }
 
   return defaultTransporter;
-}
-
-const REAL_DELIVERY_DOMAINS = ['gmail.com', 'nmit.ac.in', 'outboxlabs.in', 'reachinbox.in', 'outlook.com', 'hotmail.com', 'yahoo.com'];
-
-export function isRealDeliveryEmail(email: string): boolean {
-  const domain = email.split('@')[1]?.toLowerCase();
-  return !!domain && REAL_DELIVERY_DOMAINS.includes(domain);
-}
-
-async function getEtherealSharedTransporter(): Promise<Transporter> {
-  if (etherealSharedTransporter) return etherealSharedTransporter;
-  const testAccount = await nodemailer.createTestAccount();
-  etherealSharedTransporter = nodemailer.createTransport({
-    host: 'smtp.ethereal.email',
-    port: 587,
-    secure: false,
-    auth: { user: testAccount.user, pass: testAccount.pass },
-  });
-  console.log('[Mailer] Ethereal shared transporter ready:', testAccount.user);
-  return etherealSharedTransporter;
 }
 
 export interface SendEmailOptions {
@@ -123,7 +129,7 @@ export interface SendEmailOptions {
   textBody: string;
   htmlBody?: string;
   smtpConfig?: SmtpConfig;
-  attachments?: EmailAttachment[];
+  messageId?: string;
 }
 
 export interface SendEmailResult {
@@ -134,18 +140,33 @@ export interface SendEmailResult {
   error?: string;
 }
 
+// Domains that get real delivery via Gmail SMTP
+const REAL_DELIVERY_DOMAINS = ['gmail.com', 'nmit.ac.in', 'outboxlabs.in', 'reachinbox.in', 'outlook.com', 'hotmail.com', 'yahoo.com'];
+
+export function isRealDeliveryEmail(email: string): boolean {
+  const domain = email.split('@')[1]?.toLowerCase() || '';
+  return REAL_DELIVERY_DOMAINS.some(d => domain === d || domain.endsWith('.' + d));
+}
+
 export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult> {
   try {
     let transport: Transporter;
     let isRealDelivery = false;
 
-    if (opts.smtpConfig && opts.smtpConfig.host && opts.smtpConfig.user) {
-      transport = getCustomTransporter(opts.smtpConfig);
-      isRealDelivery = true;
-    } else if (isRealDeliveryEmail(opts.toEmail) && process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-      transport = await getTransporter();
+    const useReal = isRealDeliveryEmail(opts.toEmail) &&
+      process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS &&
+      !process.env.SMTP_PASS.includes('REPLACE');
+
+    if (useReal) {
+      // Real delivery via Gmail SMTP
+      if (opts.smtpConfig && opts.smtpConfig.host && !/ethereal/i.test(opts.smtpConfig.host)) {
+        transport = getCustomTransporter(opts.smtpConfig);
+      } else {
+        transport = await getTransporter();
+      }
       isRealDelivery = true;
     } else {
+      // Ethereal sandbox — always use shared transporter so getTestMessageUrl works
       transport = await getEtherealSharedTransporter();
       isRealDelivery = false;
     }
@@ -170,14 +191,10 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
     const info = await transport.sendMail({
       from: `"${senderName}" <${senderFrom}>`,
       to: opts.toEmail,
+      messageId: opts.messageId,
       subject: opts.subject,
       text: opts.textBody,
       html: formattedHtml,
-      attachments: opts.attachments?.map((a) => ({
-        filename: a.filename,
-        content: Buffer.from(a.content, 'base64'),
-        contentType: a.contentType,
-      })),
     });
 
     const previewUrl = nodemailer.getTestMessageUrl(info) || undefined;

@@ -1,6 +1,9 @@
 import { db } from './db.js';
+import { redisConnection } from './redis.js';
+import { claimRateLimitAlert } from './rateLimit.js';
 
 interface SlackAlertOptions {
+  userId: string;
   senderEmail: string;
   hourlyLimit: number;
   currentCount: number;
@@ -11,7 +14,8 @@ interface SlackAlertOptions {
 export async function sendSlackRateLimitAlert(
   opts: SlackAlertOptions
 ): Promise<{ success: boolean; message?: string }> {
-  const slackConfig = await db.getSlackConfig();
+  // Looked up per user at call time: connecting later works without a redeploy, and tenants never see each other's alerts.
+  const slackConfig = await db.getSlackConfig(opts.userId);
 
   if (!slackConfig.connected || !slackConfig.webhookUrl) {
     console.log('[Slack] Rate limit alert skipped: Slack not connected.');
@@ -54,7 +58,7 @@ export async function sendSlackRateLimitAlert(
     });
 
     if (res.ok) {
-      await db.updateSlackConfig({ lastNotifiedAt: new Date().toISOString() });
+      await db.updateSlackConfig({ userId: opts.userId, lastNotifiedAt: new Date().toISOString() });
       console.log('[Slack] Rate limit notification sent to', slackConfig.channelName);
       return { success: true };
     }
@@ -97,5 +101,27 @@ export async function sendSlackTestMessage(
     return { success: false, message: `Slack returned ${res.status}: ${errText}` };
   } catch (err: any) {
     return { success: false, message: err.message };
+  }
+}
+
+
+/**
+ * Called by the worker when a sender hits its hourly cap. Never throws.
+ * - Slack not connected  -> skip silently (and don't burn the once-per-window claim, so connecting later works).
+ * - Connected            -> one live message per (user, sender, hour window) across all workers (Redis SET NX).
+ * - Slack call fails     -> release the claim so the next rate-limited job retries the alert.
+ */
+export async function notifyRateLimitHit(opts: SlackAlertOptions): Promise<void> {
+  try {
+    const cfg = await db.getSlackConfig(opts.userId);
+    if (!cfg.connected || !cfg.webhookUrl || !cfg.notifyOnRateLimit) return;
+    if (!(await claimRateLimitAlert(redisConnection, opts.userId, opts.senderEmail))) return;
+    const r = await sendSlackRateLimitAlert(opts);
+    if (!r.success) {
+      const { hourWindow } = await import('./rateLimit.js');
+      await redisConnection.del(`rl:alert:${opts.userId}:${opts.senderEmail}:${hourWindow()}`);
+    }
+  } catch (err: any) {
+    console.error('[Slack] notifyRateLimitHit failed (non-fatal):', err.message);
   }
 }

@@ -1,7 +1,9 @@
 import { db } from './db.js';
 import { ScheduledEmailItem } from '../src/types.js';
+import { esSearch, isSearchReady } from './es.js';
 
 export interface SearchQuery {
+  userId: string;
   term?: string;
   status?: string;
   type?: 'scheduled' | 'sent' | 'all';
@@ -14,37 +16,29 @@ export interface SearchResult {
   items: ScheduledEmailItem[];
   hitsCount: number;
   tookMs: number;
+  engine: 'elasticsearch' | 'sql';
 }
 
+/**
+ * Free-text queries go to Elasticsearch (fuzzy, ranked). Plain listings and filters come from Postgres,
+ * which is always consistent; ES refreshes ~1s behind, which would make a just-scheduled batch look missing.
+ * If ES is down or errors, the SQL path answers instead, so search never takes the dashboard down.
+ */
 export async function searchEmails(query: SearchQuery): Promise<SearchResult> {
-  const startTime = Date.now();
-  let list = await db.getEmails();
-
-  if (query.type === 'scheduled') {
-    list = list.filter((e) => e.status === 'scheduled' || e.status === 'queued' || e.status === 'processing');
-  } else if (query.type === 'sent') {
-    list = list.filter((e) => e.status === 'sent' || e.status === 'failed');
-  }
-
-  if (query.status && query.status !== 'all') {
-    list = list.filter((e) => e.status.toLowerCase() === query.status?.toLowerCase());
-  }
-
-  if (query.term?.trim()) {
-    const term = query.term.toLowerCase().trim();
-    list = list.filter(
-      (e) =>
-        e.recipientEmail.toLowerCase().includes(term) ||
-        e.subject.toLowerCase().includes(term) ||
-        e.body?.toLowerCase().includes(term) ||
-        e.senderEmail.toLowerCase().includes(term)
-    );
-  }
-
-  const total = list.length;
+  const started = Date.now();
   const offset = query.offset || 0;
   const limit = query.limit || 10;
-  const items = list.slice(offset, offset + limit);
+  const term = query.term?.trim() || '';
 
-  return { total, items, hitsCount: items.length, tookMs: Date.now() - startTime };
+  if (term && isSearchReady()) {
+    try {
+      const r = await esSearch({ userId: query.userId, term, type: query.type, status: query.status, offset, limit });
+      return { total: r.total, items: r.items, hitsCount: r.items.length, tookMs: r.tookMs, engine: 'elasticsearch' };
+    } catch (err: any) {
+      console.warn('[Search] ES query failed, falling back to SQL:', err.message);
+    }
+  }
+
+  const r = await db.searchEmailsForUser(query.userId, { type: query.type, status: query.status, term, offset, limit });
+  return { total: r.total, items: r.items, hitsCount: r.items.length, tookMs: Date.now() - started, engine: 'sql' };
 }

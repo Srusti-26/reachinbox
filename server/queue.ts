@@ -1,279 +1,187 @@
-import { Queue, Worker, Job, QueueEvents } from 'bullmq';
-import IORedis from 'ioredis';
+import { Queue, Worker, Job, DelayedError } from 'bullmq';
 import { db } from './db.js';
+import { config } from './config.js';
 import { sendEmail } from './mailer.js';
-import { sendSlackRateLimitAlert } from './slack.js';
-import { QueueHealthStats, EmailAttachment } from '../src/types.js';
+import { notifyRateLimitHit } from './slack.js';
+import { redisConnection } from './redis.js';
+import { tryConsume, releaseSlot, rescheduleTime, nextWindowStart } from './rateLimit.js';
+import { updateEmailDoc } from './es.js';
+import { QueueHealthStats } from '../src/types.js';
 
-const QUEUE_NAME = 'email-dispatch';
+export { redisConnection };
+export const QUEUE_NAME = 'email-dispatch';
+const MAX_ATTEMPTS = 3;
 
-// Redis connection — shared across Queue, Worker, QueueEvents
-export const redisConnection = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379', {
-  maxRetriesPerRequest: null, // required by BullMQ
-  enableReadyCheck: false,
-});
-
-redisConnection.on('error', (err) => {
-  console.error('[Redis] Connection error:', err.message);
-});
-
-// The BullMQ Queue — used to add delayed jobs
 export const emailBullQueue = new Queue(QUEUE_NAME, {
   connection: redisConnection,
   defaultJobOptions: {
     removeOnComplete: { count: 500 },
     removeOnFail: { count: 200 },
-    attempts: 3,
+    attempts: MAX_ATTEMPTS,
     backoff: { type: 'exponential', delay: 5000 },
   },
 });
 
-// Attachments live once per campaign. Cache the last few so a 1000-email campaign doesn't re-read ~10MB from Postgres per send.
-const attachmentCache = new Map<string, EmailAttachment[]>();
-async function getCampaignAttachments(campaignId: string): Promise<EmailAttachment[]> {
-  const hit = attachmentCache.get(campaignId);
-  if (hit) return hit;
-  const list = await db.getCampaignAttachments(campaignId);
-  attachmentCache.set(campaignId, list);
-  if (attachmentCache.size > 5) attachmentCache.delete(attachmentCache.keys().next().value as string);
-  return list;
-}
+/**
+ * The job processor. Order matters:
+ *   1. atomic DB claim  (scheduled -> processing; only one worker wins)  => no duplicate sends
+ *   2. Redis Lua slot   (per sender, per hour window)                    => safe across workers/instances
+ *   3. SMTP send, then mark sent
+ * Over the cap the SAME job is moved to the next hour window (DelayedError); it is never failed or dropped.
+ */
+async function processor(job: Job, token?: string) {
+  const { emailId } = job.data as { emailId: string };
 
-// Track senders alerted this hour to avoid duplicate Slack pings
-const alertedSendersThisHour = new Set<string>();
+  const ctx = await db.getEmailForWorker(emailId);
+  if (!ctx) {
+    console.warn(`[Worker] Email ${emailId} not found, skipping.`);
+    return { skipped: 'not_found' };
+  }
+  const { email, userId, campaignHourlyLimit, campaignSubject } = ctx;
 
-// Reset alert set when hour rolls over
-let lastAlertHour = new Date().getUTCHours();
-function resetAlertsIfNewHour() {
-  const currentHour = new Date().getUTCHours();
-  if (currentHour !== lastAlertHour) {
-    alertedSendersThisHour.clear();
-    lastAlertHour = currentHour;
+  if (email.status === 'sent' || email.status === 'cancelled') return { skipped: email.status };
+  if (!(await db.claimEmail(emailId))) return { skipped: 'already_claimed' };
+
+  const senders = await db.getSenders(userId);
+  const sender = senders.find((s) => s.email === email.senderEmail);
+
+  // Effective cap = tightest of: this campaign's limit, the mailbox's limit, the global per-sender ceiling.
+  const limit = Math.min(
+    campaignHourlyLimit > 0 ? campaignHourlyLimit : Infinity,
+    sender?.hourlyLimit && sender.hourlyLimit > 0 ? sender.hourlyLimit : Infinity,
+    config.maxEmailsPerHourPerSender
+  );
+
+  const allowed = await tryConsume(redisConnection, email.senderEmail, limit);
+  if (!allowed) {
+    const resumeAt = rescheduleTime(new Date(email.scheduledTime).getTime());
+    await db.updateEmail(emailId, { status: 'scheduled', scheduledTime: new Date(resumeAt).toISOString() });
+    await updateEmailDoc(emailId, { status: 'scheduled', scheduledTime: new Date(resumeAt).toISOString() });
+    console.warn(`[Worker] ${email.senderEmail} hit ${limit}/hr. ${emailId} moved to ${new Date(resumeAt).toISOString()}`);
+
+    await notifyRateLimitHit({
+      userId,
+      senderEmail: email.senderEmail,
+      hourlyLimit: limit,
+      currentCount: limit,
+      campaignContext: campaignSubject,
+      nextEligibleWindow: new Date(nextWindowStart()).toISOString(),
+    });
+
+    await job.moveToDelayed(resumeAt, token);
+    throw new DelayedError();
+  }
+
+  try {
+    const result = await sendEmail({
+      fromName: email.senderName || sender?.name || 'ReachInbox Outreach',
+      fromEmail: email.senderEmail,
+      toEmail: email.recipientEmail,
+      subject: email.subject,
+      textBody: email.body,
+      smtpConfig: sender?.smtpConfig,
+      messageId: `<${emailId}@reachinbox.local>`, // stable id: same email => same Message-ID
+    });
+    if (!result.success) throw new Error(result.error || 'SMTP delivery failed');
+
+    const sentTime = new Date().toISOString();
+    await db.updateEmail(emailId, { status: 'sent', sentTime, etherealPreviewUrl: result.etherealPreviewUrl });
+    await updateEmailDoc(emailId, { status: 'sent', sentTime });
+    await db.incrementHourlyCount(1);
+    await db.bumpCampaign(email.campaignId, { sent: 1 });
+    console.log(`[Worker] ✓ ${email.recipientEmail} via ${email.senderEmail}. Preview: ${result.etherealPreviewUrl || 'N/A'}`);
+    return { sent: true };
+  } catch (err: any) {
+    await releaseSlot(redisConnection, email.senderEmail); // a failed send must not burn quota
+    // attemptsMade is 0-based for the attempt in flight; only the LAST attempt is a real failure.
+    const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? MAX_ATTEMPTS);
+    if (finalAttempt) {
+      const sentTime = new Date().toISOString();
+      await db.updateEmail(emailId, { status: 'failed', sentTime, error: err.message || 'Worker error' });
+      await updateEmailDoc(emailId, { status: 'failed', sentTime });
+      await db.bumpCampaign(email.campaignId, { failed: 1 });
+    } else {
+      // back to scheduled so the retry can claim it again
+      await db.updateEmail(emailId, { status: 'scheduled', error: err.message || 'Worker error' });
+    }
+    throw err; // BullMQ applies exponential backoff
   }
 }
 
-// BullMQ Worker — processes email jobs from Redis queue
-const worker = new Worker(
-  QUEUE_NAME,
-  async (job: Job) => {
-    resetAlertsIfNewHour();
+let worker: Worker | null = null;
 
-    const { emailId } = job.data as { emailId: string };
-    const email = await db.getEmailById(emailId);
+export async function startWorker(): Promise<void> {
+  if (worker) return;
+  const settings = await db.getSettings().catch(() => null);
+  // env wins; the Settings UI value is the fallback
+  const concurrency = process.env.WORKER_CONCURRENCY ? config.workerConcurrency : settings?.workerConcurrency ?? config.workerConcurrency;
 
-    if (!email) {
-      console.warn(`[Worker] Email ${emailId} not found in DB, skipping.`);
-      return;
-    }
-
-    // Idempotency: skip if already sent or cancelled
-    if (email.status === 'sent' || email.status === 'cancelled') {
-      console.log(`[Worker] Email ${emailId} already ${email.status}, skipping.`);
-      return;
-    }
-
-    const senders = await db.getSenders();
-    const sender = senders.find((s) => s.email === email.senderEmail) || senders[0];
-    const settings = await db.getSettings();
-
-    // Per-sender hourly rate limit check using Redis counter
-    const hourKey = getHourKey();
-    const redisRateLimitKey = `rate:${email.senderEmail}:${hourKey}`;
-    const senderHourlyLimit = sender?.hourlyLimit || settings.maxEmailsPerHour;
-
-    const currentCount = await redisConnection.incr(redisRateLimitKey);
-    // Set TTL of 2 hours on first increment so keys auto-expire
-    if (currentCount === 1) {
-      await redisConnection.expire(redisRateLimitKey, 7200);
-    }
-
-    if (currentCount > senderHourlyLimit) {
-      // Decrement back since we won't send
-      await redisConnection.decr(redisRateLimitKey);
-
-      // Reschedule to next hour boundary
-      const nextHour = getNextHourBoundary();
-      const delayMs = nextHour.getTime() - Date.now();
-
-      console.warn(
-        `[Worker] Rate limit hit for ${email.senderEmail} (${senderHourlyLimit}/hr). Rescheduling ${emailId} to ${nextHour.toISOString()}`
-      );
-
-      await db.updateEmail(emailId, {
-        scheduledTime: nextHour.toISOString(),
-        status: 'scheduled',
-      });
-
-      // Re-add to BullMQ with delay to next hour
-      await emailBullQueue.add(
-        'send-email',
-        { emailId },
-        {
-          delay: delayMs,
-          jobId: `${emailId}_retry_${nextHour.getTime()}`,
-          removeOnComplete: { count: 500 },
-          removeOnFail: { count: 200 },
-        }
-      );
-
-      // Fire Slack alert once per sender per hour
-      if (!alertedSendersThisHour.has(email.senderEmail)) {
-        alertedSendersThisHour.add(email.senderEmail);
-        sendSlackRateLimitAlert({
-          senderEmail: email.senderEmail,
-          hourlyLimit: senderHourlyLimit,
-          currentCount: senderHourlyLimit,
-          campaignContext: email.subject,
-          nextEligibleWindow: nextHour.toLocaleTimeString(),
-        }).catch((e) => console.error('[Worker] Slack alert error:', e));
-      }
-
-      return;
-    }
-
-    // Mark as processing (idempotency guard)
-    await db.updateEmail(emailId, { status: 'processing' });
-
-    try {
-      const result = await sendEmail({
-        fromName: email.senderName || sender?.name || 'ReachInbox Outreach',
-        fromEmail: email.senderEmail,
-        toEmail: email.recipientEmail,
-        subject: email.subject,
-        textBody: email.body,
-        smtpConfig: sender?.smtpConfig,
-        attachments: await getCampaignAttachments(email.campaignId),
-      });
-
-      const nowIso = new Date().toISOString();
-
-      if (result.success) {
-        await db.updateEmail(emailId, {
-          status: 'sent',
-          sentTime: nowIso,
-          etherealPreviewUrl: result.etherealPreviewUrl,
-          error: undefined,
-        });
-
-        // Sync DB hourly counter
-        await db.incrementHourlyCount(1);
-
-        if (email.campaignId) {
-          const campaigns = await db.getCampaigns();
-          const campaign = campaigns.find((c) => c.id === email.campaignId);
-          if (campaign) {
-            await db.updateCampaign(campaign.id, {
-              sentCount: campaign.sentCount + 1,
-              scheduledCount: Math.max(0, campaign.scheduledCount - 1),
-            });
-          }
-        }
-
-        console.log(
-          `[Worker] ✓ Sent to ${email.recipientEmail}. Preview: ${result.etherealPreviewUrl || 'N/A'}`
-        );
-      } else {
-        await db.updateEmail(emailId, {
-          status: 'failed',
-          sentTime: nowIso,
-          error: result.error || 'Delivery failed',
-        });
-
-        if (email.campaignId) {
-          const campaigns = await db.getCampaigns();
-          const campaign = campaigns.find((c) => c.id === email.campaignId);
-          if (campaign) {
-            await db.updateCampaign(campaign.id, {
-              failedCount: campaign.failedCount + 1,
-              scheduledCount: Math.max(0, campaign.scheduledCount - 1),
-            });
-          }
-        }
-
-        console.warn(`[Worker] ✗ Failed for ${email.recipientEmail}: ${result.error}`);
-        // Throw so BullMQ retries with backoff
-        throw new Error(result.error || 'SMTP delivery failed');
-      }
-    } catch (err: any) {
-      await db.updateEmail(emailId, {
-        status: 'failed',
-        sentTime: new Date().toISOString(),
-        error: err.message || 'Worker error',
-      });
-      throw err; // Let BullMQ handle retries
-    }
-  },
-  {
+  worker = new Worker(QUEUE_NAME, processor, {
     connection: redisConnection,
-    concurrency: 5, // overridden dynamically below
-    limiter: {
-      max: 10,
-      duration: 1000, // max 10 jobs/sec across all workers
-    },
+    concurrency,
+    // Minimum gap between ANY two sends, shared across every worker on this queue.
+    limiter: { max: 1, duration: config.minDelayBetweenSendsMs },
+  });
+  worker.on('failed', (job, err) => console.error(`[BullMQ] Job ${job?.id} failed (attempt ${job?.attemptsMade}): ${err.message}`));
+  worker.on('error', (err) => console.error('[BullMQ] Worker error:', err.message));
+  console.log(`[Worker] started: concurrency=${concurrency}, min gap=${config.minDelayBetweenSendsMs}ms, cap=${config.maxEmailsPerHourPerSender}/hr/sender`);
+}
+
+/**
+ * One-time startup recovery (NOT cron). Jobs normally survive restarts in Redis (AOF on), but this heals
+ * the gaps: Redis flushed, the API crashed between the DB insert and the enqueue, or a worker died mid-send.
+ * jobId === emailId makes it idempotent: anything that already has a job is left alone.
+ */
+export async function reconcileQueue(): Promise<{ reset: number; pending: number; requeued: number }> {
+  const reset = await db.resetStuckProcessing();
+  const pending = await db.getPendingForReconcile();
+  let requeued = 0;
+  for (const row of pending) {
+    if (!(await emailBullQueue.getJob(row.id))) {
+      await upsertJob(row.id, row.scheduledTime);
+      requeued++;
+    }
   }
-);
-
-worker.on('completed', (job) => {
-  console.log(`[BullMQ] Job ${job.id} completed.`);
-});
-
-worker.on('failed', (job, err) => {
-  console.error(`[BullMQ] Job ${job?.id} failed: ${err.message}`);
-});
-
-// Helper: Redis-safe hourly key
-function getHourKey(): string {
-  const now = new Date();
-  return `${now.getUTCFullYear()}-${now.getUTCMonth() + 1}-${now.getUTCDate()}:${now.getUTCHours()}`;
+  console.log(`[Reconcile] reset=${reset} pending=${pending.length} requeued=${requeued}`);
+  return { reset, pending: pending.length, requeued };
 }
 
-function getNextHourBoundary(): Date {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours() + 1, 0, 5);
+/**
+ * Add or re-time the job for an email. jobId === emailId, so a second add can't create a duplicate.
+ * Finished jobs are removed first (BullMQ otherwise ignores the add and a retry silently does nothing).
+ */
+async function upsertJob(emailId: string, runAt: Date, opts: { retime?: boolean } = {}): Promise<void> {
+  const delay = Math.max(0, runAt.getTime() - Date.now());
+  const existing = await emailBullQueue.getJob(emailId);
+  if (existing) {
+    const state = await existing.getState();
+    if (state === 'completed' || state === 'failed') await existing.remove();
+    else if (state === 'delayed' && opts.retime) {
+      await existing.changeDelay(delay);
+      return;
+    } else return; // waiting / active / delayed: leave it
+  }
+  await emailBullQueue.add('send-email', { emailId }, { delay, jobId: emailId });
 }
 
-// Public API used by server.ts routes
 export const emailQueue = {
-  /**
-   * Add a delayed email job to BullMQ. Uses deterministic jobId for idempotency.
-   */
   async addEmailJob(emailId: string, scheduledTime: Date): Promise<void> {
-    const delayMs = Math.max(0, scheduledTime.getTime() - Date.now());
-    await emailBullQueue.add(
-      'send-email',
-      { emailId },
-      {
-        delay: delayMs,
-        jobId: emailId, // deterministic — prevents duplicate jobs on restart
-        removeOnComplete: { count: 500 },
-        removeOnFail: { count: 200 },
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-      }
-    );
+    await upsertJob(emailId, scheduledTime);
   },
 
   async retryEmail(id: string): Promise<boolean> {
     const email = await db.getEmailById(id);
-    if (!email) return false;
-    await db.updateEmail(id, {
-      status: 'scheduled',
-      scheduledTime: new Date().toISOString(),
-      error: undefined,
-    });
-    await this.addEmailJob(id, new Date());
+    if (!email || email.status === 'sent' || email.status === 'processing') return false;
+    await db.updateEmail(id, { status: 'scheduled', scheduledTime: new Date().toISOString(), error: undefined });
+    await upsertJob(id, new Date(), { retime: true });
     return true;
   },
 
   async sendNow(id: string): Promise<boolean> {
     const email = await db.getEmailById(id);
-    if (!email || email.status === 'sent') return false;
-    await db.updateEmail(id, {
-      status: 'scheduled',
-      scheduledTime: new Date(Date.now() - 1000).toISOString(),
-      delaySeconds: 0,
-    });
-    await this.addEmailJob(id, new Date(Date.now() - 1000));
+    if (!email || email.status === 'sent' || email.status === 'processing') return false;
+    await db.updateEmail(id, { status: 'scheduled', scheduledTime: new Date().toISOString(), delaySeconds: 0 });
+    await upsertJob(id, new Date(), { retime: true });
     return true;
   },
 
@@ -285,30 +193,28 @@ export const emailQueue = {
       emailBullQueue.getCompletedCount(),
       emailBullQueue.getFailedCount(),
     ]);
-
     const settings = await db.getSettings();
     const hourlyCount = await db.getHourlyCount();
     const rateLimitPaused = hourlyCount >= settings.maxEmailsPerHour;
-
-    const nextHour = getNextHourBoundary();
-
     return {
       waiting,
       delayed,
       active,
       completed,
       failed,
-      concurrency: settings.workerConcurrency,
+      concurrency: worker?.opts.concurrency ?? config.workerConcurrency,
       rateLimitPaused,
-      nextEligibleSendTime: rateLimitPaused ? nextHour.toISOString() : undefined,
+      nextEligibleSendTime: rateLimitPaused ? new Date(nextWindowStart()).toISOString() : undefined,
     };
   },
 
-  stopWorker(): void {
-    worker.close().catch(console.error);
+  /** Apply a new concurrency from the Settings UI without a restart (env var, if set, still wins). */
+  applyConcurrency(n: number): void {
+    if (worker && !process.env.WORKER_CONCURRENCY && n > 0) worker.concurrency = n;
   },
 
-  triggerTick(): void {
-    // No-op: BullMQ handles this automatically via Redis
+  async stopWorker(): Promise<void> {
+    await worker?.close();
+    worker = null;
   },
 };

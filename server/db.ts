@@ -1,16 +1,9 @@
 import { PrismaClient } from '@prisma/client';
-import { ScheduledEmailItem, EmailAttachment, Campaign, SenderAccount, SlackConfig, UserProfile } from '../src/types.js';
+import { ScheduledEmailItem, Campaign, SenderAccount, SlackConfig, UserProfile } from '../src/types.js';
 
 const prisma = new PrismaClient();
 
 export { prisma };
-
-// Campaign columns for normal reads. Excludes `attachments` (base64, up to ~10MB) so list/counter queries stay light.
-const CAMPAIGN_SELECT = {
-  id: true, userId: true, name: true, subject: true, body: true, totalRecipients: true, scheduledCount: true,
-  sentCount: true, failedCount: true, startTime: true, delayBetweenEmailsSeconds: true, hourlyLimit: true,
-  senderEmail: true, status: true, createdAt: true, updatedAt: true,
-} as const;
 
 // ─── Type helpers ────────────────────────────────────────────────────────────
 
@@ -205,9 +198,105 @@ class Database {
 
   async cancelEmail(id: string): Promise<boolean> {
     const email = await this.getEmailById(id);
-    if (!email || email.status === 'sent') return false;
+    if (!email || email.status === 'sent' || email.status === 'processing') return false;
     await this.updateEmail(id, { status: 'cancelled' });
     return true;
+  }
+
+  // ── Worker / ownership / scoped queries ───────────────────────────────────
+
+  /** Atomic claim: exactly one caller can move scheduled -> processing. Guards against duplicate sends. */
+  async claimEmail(id: string): Promise<boolean> {
+    const r = await prisma.scheduledEmail.updateMany({
+      where: { id, status: { in: ['scheduled', 'queued'] } },
+      data: { status: 'processing' },
+    });
+    return r.count === 1;
+  }
+
+  async getEmailForWorker(id: string) {
+    const row = await prisma.scheduledEmail.findUnique({
+      where: { id },
+      include: { campaign: { select: { userId: true, hourlyLimit: true, subject: true } } },
+    });
+    if (!row) return null;
+    return {
+      email: mapEmail(row),
+      userId: row.campaign.userId,
+      campaignHourlyLimit: row.campaign.hourlyLimit,
+      campaignSubject: row.campaign.subject,
+    };
+  }
+
+  /** Rows that should have a live BullMQ job. Used once at boot (see reconcile in queue.ts). */
+  async getPendingForReconcile(): Promise<{ id: string; scheduledTime: Date }[]> {
+    return prisma.scheduledEmail.findMany({
+      where: { status: { in: ['scheduled', 'queued', 'processing'] } },
+      select: { id: true, scheduledTime: true },
+    });
+  }
+
+  /** A worker that crashed mid-send leaves rows in 'processing'; put them back so they get retried. */
+  async resetStuckProcessing(): Promise<number> {
+    const r = await prisma.scheduledEmail.updateMany({ where: { status: 'processing' }, data: { status: 'scheduled' } });
+    return r.count;
+  }
+
+  async emailOwnedBy(id: string, userId: string): Promise<boolean> {
+    const row = await prisma.scheduledEmail.findFirst({ where: { id, campaign: { userId } }, select: { id: true } });
+    return !!row;
+  }
+
+  private emailWhere(userId: string, opts: { type?: 'scheduled' | 'sent' | 'all'; status?: string; term?: string }) {
+    const statuses =
+      opts.type === 'scheduled' ? ['scheduled', 'queued', 'processing'] : opts.type === 'sent' ? ['sent', 'failed'] : undefined;
+    const term = opts.term?.trim();
+    return {
+      campaign: { userId },
+      ...(opts.status && opts.status !== 'all'
+        ? { status: opts.status.toLowerCase() }
+        : statuses
+          ? { status: { in: statuses } }
+          : {}),
+      ...(term
+        ? {
+            OR: [
+              { recipientEmail: { contains: term, mode: 'insensitive' as const } },
+              { subject: { contains: term, mode: 'insensitive' as const } },
+              { body: { contains: term, mode: 'insensitive' as const } },
+              { senderEmail: { contains: term, mode: 'insensitive' as const } },
+            ],
+          }
+        : {}),
+    };
+  }
+
+  /** SQL-backed list/search, scoped to the user. Used directly and as the Elasticsearch fallback. */
+  async searchEmailsForUser(
+    userId: string,
+    opts: { type?: 'scheduled' | 'sent' | 'all'; status?: string; term?: string; offset?: number; limit?: number }
+  ): Promise<{ items: ScheduledEmailItem[]; total: number }> {
+    const where = this.emailWhere(userId, opts);
+    const [rows, total] = await Promise.all([
+      prisma.scheduledEmail.findMany({
+        where,
+        orderBy: opts.type === 'sent' ? { sentTime: 'desc' } : { scheduledTime: 'asc' },
+        skip: opts.offset ?? 0,
+        take: opts.limit ?? 10,
+      }),
+      prisma.scheduledEmail.count({ where }),
+    ]);
+    return { items: rows.map(mapEmail), total };
+  }
+
+  async getStatsForUser(userId: string) {
+    const base = { campaign: { userId } };
+    const [scheduled, sent, failed] = await Promise.all([
+      prisma.scheduledEmail.count({ where: { ...base, status: { in: ['scheduled', 'queued', 'processing'] } } }),
+      prisma.scheduledEmail.count({ where: { ...base, status: 'sent' } }),
+      prisma.scheduledEmail.count({ where: { ...base, status: 'failed' } }),
+    ]);
+    return { scheduled, sent, failed };
   }
 
   // ── Campaigns ─────────────────────────────────────────────────────────────
@@ -216,7 +305,6 @@ class Database {
     const rows = await prisma.campaign.findMany({
       where: userId ? { userId } : undefined,
       orderBy: { createdAt: 'desc' },
-      select: CAMPAIGN_SELECT,
     });
     return rows.map(mapCampaign);
   }
@@ -238,22 +326,29 @@ class Database {
         hourlyLimit: campaign.hourlyLimit,
         senderEmail: campaign.senderEmail,
         status: campaign.status,
-        ...(campaign.attachments?.length ? { attachments: campaign.attachments as any } : {}),
       },
     });
   }
 
-  /** Attachments for a campaign (empty list if none). Called by the worker when sending. */
-  async getCampaignAttachments(campaignId: string): Promise<EmailAttachment[]> {
-    const row = await prisma.campaign.findUnique({ where: { id: campaignId }, select: { attachments: true } });
-    return ((row?.attachments as unknown) as EmailAttachment[] | null) ?? [];
+  /** Atomic counters (the old read-modify-write lost updates under concurrency). */
+  async bumpCampaign(id: string, d: { sent?: number; failed?: number }): Promise<void> {
+    try {
+      await prisma.campaign.update({
+        where: { id },
+        data: {
+          ...(d.sent && { sentCount: { increment: d.sent }, scheduledCount: { decrement: d.sent } }),
+          ...(d.failed && { failedCount: { increment: d.failed }, scheduledCount: { decrement: d.failed } }),
+        },
+      });
+    } catch {
+      /* campaign deleted; ignore */
+    }
   }
 
   async updateCampaign(id: string, partial: Partial<Campaign>): Promise<Campaign | null> {
     try {
       const row = await prisma.campaign.update({
         where: { id },
-        select: CAMPAIGN_SELECT,
         data: {
           ...(partial.sentCount !== undefined && { sentCount: partial.sentCount }),
           ...(partial.failedCount !== undefined && { failedCount: partial.failedCount }),
@@ -343,7 +438,7 @@ class Database {
     return mapSlack(row);
   }
 
-  async updateSlackConfig(partial: Partial<SlackConfig> & { userId?: string }): Promise<SlackConfig> {
+  async updateSlackConfig(partial: Partial<SlackConfig> & { userId?: string; accessToken?: string }): Promise<SlackConfig> {
     const userId = partial.userId || (await this.getFirstUserId());
     if (!userId) return this.getSlackConfig();
 
@@ -354,6 +449,7 @@ class Database {
         ...(partial.webhookUrl !== undefined && { webhookUrl: partial.webhookUrl }),
         ...(partial.channelName !== undefined && { channelName: partial.channelName }),
         ...(partial.teamName !== undefined && { teamName: partial.teamName }),
+        ...(partial.accessToken !== undefined && { accessToken: partial.accessToken }),
         ...(partial.notifyOnRateLimit !== undefined && { notifyOnRateLimit: partial.notifyOnRateLimit }),
         ...(partial.notifyOnFailure !== undefined && { notifyOnFailure: partial.notifyOnFailure }),
         ...(partial.notifyOnCampaignComplete !== undefined && { notifyOnCampaignComplete: partial.notifyOnCampaignComplete }),
@@ -365,6 +461,7 @@ class Database {
         webhookUrl: partial.webhookUrl,
         channelName: partial.channelName ?? '#email-alerts',
         teamName: partial.teamName,
+        accessToken: partial.accessToken,
         notifyOnRateLimit: partial.notifyOnRateLimit ?? true,
         notifyOnFailure: partial.notifyOnFailure ?? true,
         notifyOnCampaignComplete: partial.notifyOnCampaignComplete ?? true,

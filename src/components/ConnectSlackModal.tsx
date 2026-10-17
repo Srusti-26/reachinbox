@@ -24,35 +24,16 @@ export const ConnectSlackModal: React.FC<ConnectSlackModalProps> = ({
   slackConfig,
   onUpdateSlack,
 }) => {
-  const [webhookUrl, setWebhookUrl] = useState(
-    slackConfig.webhookUrl || 'https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX'
-  );
-  const [channelName, setChannelName] = useState(slackConfig.channelName || '#email-campaigns');
+  const channelName = slackConfig.channelName || 'your Slack channel';
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; msg: string } | null>(null);
 
   if (!isOpen) return null;
 
-  const handleConnect = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Real Slack OAuth v2: the server redirects to Slack's consent screen, then back to /api/v1/slack/oauth/callback.
+  const handleConnect = () => {
     setIsSubmitting(true);
-    setTestResult(null);
-
-    try {
-      const res = await fetch('/api/v1/slack/connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ webhookUrl, channelName }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to connect Slack');
-      onUpdateSlack();
-      setTestResult({ success: true, msg: 'Slack connected successfully! You can send a test notification.' });
-    } catch (err: any) {
-      setTestResult({ success: false, msg: err.message });
-    } finally {
-      setIsSubmitting(false);
-    }
+    window.location.href = '/api/v1/slack/oauth/start';
   };
 
   const handleDisconnect = async () => {
@@ -74,8 +55,6 @@ export const ConnectSlackModal: React.FC<ConnectSlackModalProps> = ({
     try {
       const res = await fetch('/api/v1/slack/test', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ webhookUrl }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to dispatch test notification');
@@ -169,63 +148,43 @@ export const ConnectSlackModal: React.FC<ConnectSlackModalProps> = ({
           </div>
         </div>
 
-        {/* Configuration Form */}
-        <form onSubmit={handleConnect} className="space-y-4 mb-4">
-          <div>
-            <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">
-              Slack Incoming Webhook URL
-            </label>
-            <input
-              type="url"
-              required
-              value={webhookUrl}
-              onChange={(e) => setWebhookUrl(e.target.value)}
-              placeholder="https://hooks.slack.com/services/..."
-              className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#5125F5]/20 focus:border-[#5125F5] font-mono"
-            />
+        {/* Feedback */}
+        {testResult && (
+          <div
+            className={`mb-4 p-3 rounded-xl text-xs flex items-start gap-2 ${
+              testResult.success
+                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                : 'bg-rose-50 text-rose-800 border border-rose-200'
+            }`}
+          >
+            {testResult.success ? (
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600 mt-0.5" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600 mt-0.5" />
+            )}
+            <span>{testResult.msg}</span>
           </div>
+        )}
 
-          <div>
-            <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1">
-              Channel Name
-            </label>
-            <input
-              type="text"
-              value={channelName}
-              onChange={(e) => setChannelName(e.target.value)}
-              placeholder="#email-alerts"
-              className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#5125F5]/20 focus:border-[#5125F5]"
-            />
+        {slackConfig.connected ? (
+          <div className="mb-4 p-3 rounded-xl text-xs bg-emerald-50 text-emerald-800 border border-emerald-200 flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>
+              Connected{slackConfig.teamName ? ` to ${slackConfig.teamName}` : ''}
+              {slackConfig.channelName ? ` · ${slackConfig.channelName}` : ''}
+            </span>
           </div>
-
-          {/* Test Feedback */}
-          {testResult && (
-            <div
-              className={`p-3 rounded-xl text-xs flex items-start gap-2 ${
-                testResult.success
-                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                  : 'bg-rose-50 text-rose-800 border border-rose-200'
-              }`}
-            >
-              {testResult.success ? (
-                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600 mt-0.5" />
-              ) : (
-                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600 mt-0.5" />
-              )}
-              <span>{testResult.msg}</span>
-            </div>
-          )}
-
-          {/* Primary Action Button matching reference */}
+        ) : (
           <button
-            type="submit"
+            type="button"
+            onClick={handleConnect}
             disabled={isSubmitting}
-            className="w-full flex items-center justify-center gap-2.5 py-3 px-4 text-sm font-semibold text-white bg-[#5125F5] hover:bg-[#431dd6] rounded-xl shadow-md shadow-[#5125F5]/25 transition-all disabled:opacity-50"
+            className="w-full mb-4 flex items-center justify-center gap-2.5 py-3 px-4 text-sm font-semibold text-white bg-[#5125F5] hover:bg-[#431dd6] rounded-xl shadow-md shadow-[#5125F5]/25 transition-all disabled:opacity-50"
           >
             <Zap className="w-4 h-4" />
-            <span>{slackConfig.connected ? 'Save & Keep Connected' : 'Connect with Slack'}</span>
+            <span>Connect with Slack</span>
           </button>
-        </form>
+        )}
 
         {/* Action buttons if connected */}
         {slackConfig.connected && (

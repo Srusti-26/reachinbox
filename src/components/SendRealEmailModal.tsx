@@ -29,13 +29,13 @@ export const SendRealEmailModal: React.FC<SendRealEmailModalProps> = ({
   onEmailSent,
   onOpenSettings,
 }) => {
-  const [toEmail, setToEmail] = useState(defaultRecipient || '1nt23ad052.srusti@nmit.ac.in');
+  const [toEmail, setToEmail] = useState(defaultRecipient || '');
   const [selectedSenderEmail, setSelectedSenderEmail] = useState(
     senders.find((s) => s.isDefault)?.email || senders[0]?.email || ''
   );
-  const [subject, setSubject] = useState("ReachInbox: Live Delivery Verification");
+  const [subject, setSubject] = useState('ReachInbox: Live Delivery Verification');
   const [body, setBody] = useState(
-    `Hi Srusti,\n\nThis is a real-world test email sent directly from your ReachInbox dashboard!\n\nIf you are seeing this in your inbox, your email delivery pipeline, SMTP handshake, and queue workers are fully operational in the real world.\n\nSent at: ${new Date().toLocaleString()}\n\nBest regards,\nReachInbox Engine`
+    `Hi there,\n\nThis is a real-world test email sent directly from your ReachInbox dashboard!\n\nIf you are seeing this in your inbox, your email delivery pipeline, SMTP handshake, and queue workers are fully operational.\n\nSent at: ${new Date().toLocaleString()}\n\nBest regards,\nReachInbox Engine`
   );
 
   const [isSending, setIsSending] = useState(false);

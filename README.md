@@ -70,10 +70,12 @@ Schedule campaigns to thousands of leads, track delivery in real-time, and never
     <td><img src="screenshots/Notification.jpeg" width="420"/></td>
   </tr>
   <tr>
-    <td align="center" colspan="2"><b>Settings</b></td>
+    <td align="center"><b>Gmail Real Delivery</b></td>
+    <td align="center"><b>Settings</b></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="screenshots/Settings.jpeg" width="420"/></td>
+    <td><img src="screenshots/gmail-email-preview-redacted.jpg" width="420"/></td>
+    <td><img src="screenshots/Settings.jpeg" width="420"/></td>
   </tr>
 </table>
 

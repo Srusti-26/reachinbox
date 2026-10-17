@@ -1,0 +1,17 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+
+# NEVER commit secrets
+.env
+.env.local
+.env.*.local
+
+# Keep only the example
+!.env.example
+
+data-store.json
+reset-senders.sql

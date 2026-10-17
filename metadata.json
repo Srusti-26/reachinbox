@@ -1,0 +1,5 @@
+{
+  "name": "ReachInbox",
+  "description": "Email campaign scheduling and management platform with rate limiting, delayed delivery queues, and Slack notifications.",
+  "requestFramePermissions": []
+}

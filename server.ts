@@ -481,6 +481,15 @@ app.post('/api/v1/senders/provision-ethereal', requireAuth, async (req: Request,
   res.status(201).json({ success: true, senders: created });
 });
 
+// Re-provision both Gmail + Ethereal senders (useful after DB reset or first login)
+app.post('/api/v1/senders/reprovision', requireAuth, async (req: Request, res: Response) => {
+  const userId = getUserId(req);
+  const existing = await db.getSenders(userId);
+  for (const s of existing) await db.deleteSender(s.id);
+  const senders = await ensureSenders(userId);
+  res.json({ success: true, senders });
+});
+
 app.delete('/api/v1/senders/:id', requireAuth, async (req: Request, res: Response) => {
   if (!(await db.getSenders(getUserId(req))).some((x) => x.id === req.params.id)) return res.status(404).json({ error: 'Sender not found.' });
   const success = await db.deleteSender(req.params.id);

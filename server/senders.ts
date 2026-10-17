@@ -41,13 +41,14 @@ export async function ensureSenders(userId: string): Promise<SenderAccount[]> {
   const smtpPass = process.env.SMTP_PASS?.trim();
   const hasRealSmtp = !!(smtpUser && smtpPass && !smtpPass.includes('REPLACE') && smtpPass.length > 4);
 
+  // 1. Seed Gmail SMTP sender if credentials are available
   if (hasRealSmtp) {
     try {
       await db.addSender({
         id: `snd_${crypto.randomUUID()}`,
         userId,
         email: smtpUser!,
-        name: 'ReachInbox Outreach',
+        name: 'ReachInbox Outreach (Gmail)',
         isDefault: true,
         type: 'smtp',
         hourlyLimit: config.maxEmailsPerHourPerSender,
@@ -63,39 +64,32 @@ export async function ensureSenders(userId: string): Promise<SenderAccount[]> {
           fromName: 'ReachInbox Outreach',
         },
       });
-      console.log(`[Senders] ✓ Gmail SMTP sender seeded: ${smtpUser}`);
-      return db.getSenders(userId);
+      console.log(`[Senders] Gmail SMTP sender seeded: ${smtpUser}`);
     } catch (err: any) {
       console.error('[Senders] Gmail seed failed:', err.message);
     }
   }
 
-  // Fallback: try live Ethereal API first, then use a guaranteed local sandbox sender
+  // 2. Always seed 2 Ethereal sandbox senders for testing
   try {
-    const created = await provisionEtherealSenders(userId, 1);
-    if (created.length > 0) {
-      console.log(`[Senders] ✓ Provisioned Ethereal sender: ${created[0].email}`);
-      return created;
-    }
+    const ethereal = await provisionEtherealSenders(userId, 2);
+    console.log(`[Senders] Ethereal senders seeded: ${ethereal.map(s => s.email).join(', ')}`);
   } catch (err: any) {
-    console.warn('[Senders] Ethereal API unavailable, using local sandbox sender:', err.message);
+    console.warn('[Senders] Ethereal provisioning failed, using local sandbox:', err.message);
+    const sandboxEmail = `sandbox-${userId.slice(0, 8)}@reachinbox.local`;
+    await db.addSender({
+      id: `snd_${crypto.randomUUID()}`,
+      userId,
+      email: sandboxEmail,
+      name: 'ReachInbox Sandbox',
+      isDefault: !hasRealSmtp,
+      type: 'ethereal',
+      hourlyLimit: config.maxEmailsPerHourPerSender,
+      emailsSentCurrentHour: 0,
+      isLiveDelivery: false,
+      smtpConfig: undefined,
+    });
   }
 
-  // Guaranteed fallback: seed a local sandbox sender that uses the shared mailer transporter
-  // (no external API call needed — nodemailer handles the transport lazily)
-  const sandboxEmail = `sandbox-${userId.slice(0, 8)}@reachinbox.local`;
-  await db.addSender({
-    id: `snd_${crypto.randomUUID()}`,
-    userId,
-    email: sandboxEmail,
-    name: 'ReachInbox Sandbox',
-    isDefault: true,
-    type: 'ethereal',
-    hourlyLimit: config.maxEmailsPerHourPerSender,
-    emailsSentCurrentHour: 0,
-    isLiveDelivery: false,
-    smtpConfig: undefined,
-  });
-  console.log(`[Senders] ✓ Local sandbox sender seeded: ${sandboxEmail}`);
   return db.getSenders(userId);
 }

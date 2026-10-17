@@ -219,7 +219,7 @@ app.get('/api/v1/campaigns', requireAuth, async (req: Request, res: Response) =>
 });
 
 app.post('/api/v1/campaigns', requireAuth, async (req: Request, res: Response) => {
-  const { subject, body, recipients, startTime, delaySeconds = 30, hourlyLimit = 200, senderEmail } = req.body;
+  const { subject, body, recipients, startTime, delaySeconds = 30, hourlyLimit = 200, senderEmail, attachments } = req.body;
 
   if (!subject || !body) return res.status(400).json({ error: 'Subject and body are required.' });
   if (!Array.isArray(recipients) || recipients.length === 0)
@@ -273,6 +273,7 @@ app.post('/api/v1/campaigns', requireAuth, async (req: Request, res: Response) =
       senderEmail: selectedSender.email,
       senderName: selectedSender.name,
       delaySeconds: Number(delaySeconds) || 30,
+      attachments: attachments || [],
     };
   });
 

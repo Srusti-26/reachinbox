@@ -19,8 +19,10 @@ import {
   CheckCircle2,
   AlertCircle,
   FileSpreadsheet,
+  Paperclip,
+  Trash2,
 } from 'lucide-react';
-import { SenderAccount } from '../types.js';
+import { SenderAccount, EmailAttachment } from '../types.js';
 
 interface RecipientItem {
   email: string;
@@ -79,6 +81,8 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<EmailAttachment[]>([]);
+  const attachInputRef = useRef<HTMLInputElement>(null);
 
   if (!isOpen) return null;
 
@@ -89,6 +93,30 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
 
   const insertVariable = (token: string) => {
     setBody((prev) => `${prev} {{${token}}}`);
+  };
+
+  const handleAttachmentUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    files.forEach((file) => {
+      if (file.size > 5 * 1024 * 1024) {
+        setErrorMsg(`File "${file.name}" exceeds 5MB limit.`);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const base64 = (ev.target?.result as string).split(',')[1];
+        setAttachments((prev) => [
+          ...prev,
+          { filename: file.name, content: base64, contentType: file.type || 'application/octet-stream', size: file.size },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = '';
+  };
+
+  const removeAttachment = (idx: number) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== idx));
   };
 
   // CSV parsing helper for Step 2
@@ -220,6 +248,7 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
           delaySeconds: calculatedDelay,
           hourlyLimit,
           senderEmail: selectedSenderEmail,
+          attachments,
         }),
       });
 
@@ -437,6 +466,52 @@ export const ComposeWizardModal: React.FC<ComposeWizardModalProps> = ({
                   <label htmlFor="saveAsTemplate" className="text-xs text-slate-600 cursor-pointer">
                     Save as template
                   </label>
+                </div>
+
+                {/* Attachments */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider">
+                      Attachments
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => attachInputRef.current?.click()}
+                      className="flex items-center gap-1.5 px-3 py-1 text-xs font-semibold text-[#5125F5] bg-[#F0EEFF] hover:bg-[#5125F5]/15 rounded-lg transition-colors"
+                    >
+                      <Paperclip className="w-3.5 h-3.5" />
+                      Attach File
+                    </button>
+                    <input
+                      ref={attachInputRef}
+                      type="file"
+                      multiple
+                      className="hidden"
+                      onChange={handleAttachmentUpload}
+                    />
+                  </div>
+                  {attachments.length === 0 ? (
+                    <p className="text-xs text-slate-400">No attachments added. Max 5MB per file.</p>
+                  ) : (
+                    <ul className="space-y-1.5">
+                      {attachments.map((a, i) => (
+                        <li key={i} className="flex items-center justify-between px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs">
+                          <div className="flex items-center gap-2 text-slate-700 truncate">
+                            <Paperclip className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            <span className="truncate font-medium">{a.filename}</span>
+                            <span className="text-slate-400 shrink-0">({(a.size / 1024).toFixed(1)} KB)</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => removeAttachment(i)}
+                            className="ml-2 p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors shrink-0"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               </div>
 

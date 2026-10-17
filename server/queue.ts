@@ -131,6 +131,7 @@ const worker = new Worker(
         subject: email.subject,
         textBody: email.body,
         smtpConfig: sender?.smtpConfig,
+        attachments: (email as any).attachments || [],
       });
 
       const nowIso = new Date().toISOString();

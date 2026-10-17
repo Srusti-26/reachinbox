@@ -1,5 +1,5 @@
 import nodemailer, { type Transporter } from 'nodemailer';
-import { SmtpConfig } from '../src/types.js';
+import { SmtpConfig, EmailAttachment } from '../src/types.js';
 
 let defaultTransporter: Transporter | null = null;
 let etherealUser: string | null = null;
@@ -123,6 +123,7 @@ export interface SendEmailOptions {
   textBody: string;
   htmlBody?: string;
   smtpConfig?: SmtpConfig;
+  attachments?: EmailAttachment[];
 }
 
 export interface SendEmailResult {
@@ -172,6 +173,11 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
       subject: opts.subject,
       text: opts.textBody,
       html: formattedHtml,
+      attachments: opts.attachments?.map((a) => ({
+        filename: a.filename,
+        content: Buffer.from(a.content, 'base64'),
+        contentType: a.contentType,
+      })),
     });
 
     const previewUrl = nodemailer.getTestMessageUrl(info) || undefined;

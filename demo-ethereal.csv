@@ -1,4 +1,4 @@
 email,name
-demo.lead1@ethereal.email,Demo Lead One
-demo.lead2@ethereal.email,Demo Lead Two
-test.user@ethereal.email,Test User
+test.inbox@ethereal.email,Test Inbox
+demo.recipient@ethereal.email,Demo Recipient
+sample.lead@ethereal.email,Sample Lead

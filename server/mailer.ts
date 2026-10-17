@@ -87,12 +87,6 @@ export async function getTransporter(): Promise<Transporter> {
   return defaultTransporter;
 }
 
-export interface EmailAttachment {
-  filename: string;
-  content: Buffer | string;
-  contentType?: string;
-}
-
 export interface SendEmailOptions {
   fromName: string;
   fromEmail: string;
@@ -102,7 +96,6 @@ export interface SendEmailOptions {
   htmlBody?: string;
   smtpConfig?: SmtpConfig;
   messageId?: string;
-  attachments?: EmailAttachment[];
 }
 
 export interface SendEmailResult {
@@ -153,11 +146,6 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
       subject: opts.subject,
       text: opts.textBody,
       html: formattedHtml,
-      attachments: opts.attachments?.map((a) => ({
-        filename: a.filename,
-        content: a.content,
-        contentType: a.contentType,
-      })),
     });
 
     const previewUrl = nodemailer.getTestMessageUrl(info) || undefined;

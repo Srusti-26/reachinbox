@@ -110,14 +110,25 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
   try {
     let transport: Transporter;
     let isRealDelivery = false;
+    let isEthereal = false;
 
-    if (opts.smtpConfig && opts.smtpConfig.host && opts.smtpConfig.user) {
+    const smtpHost = opts.smtpConfig?.host || '';
+    isEthereal = /ethereal\.email$/i.test(smtpHost) || opts.smtpConfig === undefined;
+
+    if (opts.smtpConfig && opts.smtpConfig.host && opts.smtpConfig.user && !isEthereal) {
+      // Real SMTP (Gmail, etc.)
       transport = getCustomTransporter(opts.smtpConfig);
-      isRealDelivery = !/ethereal\.email$/i.test(opts.smtpConfig.host);
-    } else if (process.env.SMTP_HOST && process.env.SMTP_USER) {
+      isRealDelivery = true;
+    } else if (opts.smtpConfig && opts.smtpConfig.host && opts.smtpConfig.user && isEthereal) {
+      // Ethereal sender with stored credentials — use custom transporter so preview URL works
+      transport = getCustomTransporter(opts.smtpConfig);
+      isRealDelivery = false;
+    } else if (process.env.SMTP_HOST && process.env.SMTP_USER && !/ethereal/i.test(process.env.SMTP_HOST)) {
+      // Env-level real SMTP
       transport = await getTransporter();
       isRealDelivery = true;
     } else {
+      // Fallback: shared Ethereal transporter
       transport = await getTransporter();
       isRealDelivery = false;
     }
@@ -148,7 +159,10 @@ export async function sendEmail(opts: SendEmailOptions): Promise<SendEmailResult
       html: formattedHtml,
     });
 
-    const previewUrl = nodemailer.getTestMessageUrl(info) || undefined;
+    const previewUrl = nodemailer.getTestMessageUrl(info) ||
+      (isEthereal && info.messageId
+        ? `https://ethereal.email/message/${info.messageId.replace(/[<>]/g, '')}`
+        : undefined);
 
     return {
       success: true,
